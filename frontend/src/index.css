@@ -1,0 +1,188 @@
+@import url("https://rsms.me/inter/inter.css");
+@import "tailwindcss";
+
+/* ============================================================
+   Design tokens — refined dark (default) + light themes.
+   Components keep their zinc utility classes; we remap those
+   classes to these variables so the whole UI re-skins at once.
+   ============================================================ */
+:root {
+  --bg: #0a0a0c;
+  --surface: #141418;
+  --surface-2: #1c1c21;
+  --surface-3: #26262d;
+  --hover: #202027;
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.13);
+  --text: #ededf0;
+  --text-2: #c8c8cf;
+  --text-muted: #8e8e98;
+  --text-dim: #62626c;
+  --accent: #8b8cf9;
+  --accent-strong: #6e6ff5;
+  --accent-fill: rgba(124, 124, 246, 0.14);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.22);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --radius: 12px;
+}
+
+html.light {
+  --bg: #f6f6f8;
+  --surface: #ffffff;
+  --surface-2: #f1f1f4;
+  --surface-3: #e7e7ec;
+  --hover: #efeff2;
+  --border: rgba(9, 9, 20, 0.08);
+  --border-strong: rgba(9, 9, 20, 0.14);
+  --text: #16161a;
+  --text-2: #34343c;
+  --text-muted: #62626c;
+  --text-dim: #9a9aa4;
+  --accent: #5b5bd6;
+  --accent-strong: #4f4fd0;
+  --accent-fill: rgba(91, 91, 214, 0.1);
+  --shadow: 0 1px 2px rgba(9, 9, 20, 0.05), 0 6px 20px rgba(9, 9, 20, 0.06);
+  --shadow-sm: 0 1px 2px rgba(9, 9, 20, 0.05);
+}
+
+html {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+@supports (font-variation-settings: normal) {
+  html { font-family: "Inter var", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text-2);
+}
+
+/* Smooth theme + hover transitions everywhere (cheap properties only) */
+* {
+  transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease,
+    box-shadow 0.16s ease, opacity 0.16s ease;
+}
+
+/* ---- Remap zinc utilities to tokens (plain rules outrank Tailwind's layer) ---- */
+.bg-zinc-950 { background-color: var(--bg); }
+.bg-zinc-900 { background-color: var(--surface); }
+.bg-zinc-800 { background-color: var(--surface-2); }
+.bg-zinc-700 { background-color: var(--surface-3); }
+.bg-zinc-600 { background-color: var(--surface-3); }
+.text-zinc-100 { color: var(--text); }
+.text-zinc-200 { color: var(--text); }
+.text-zinc-300 { color: var(--text-2); }
+.text-zinc-400 { color: var(--text-muted); }
+.text-zinc-500 { color: var(--text-muted); }
+.text-zinc-600 { color: var(--text-dim); }
+.text-white { color: var(--text); }
+.border-zinc-800 { border-color: var(--border); }
+.border-zinc-700 { border-color: var(--border-strong); }
+
+/* Soften saturated accent chips into translucent tints (premium, less heavy) */
+.bg-green-900   { background-color: color-mix(in srgb, #22c55e 16%, transparent); }
+.bg-green-800   { background-color: color-mix(in srgb, #22c55e 22%, transparent); }
+.bg-green-950   { background-color: color-mix(in srgb, #22c55e 12%, transparent); }
+.bg-sky-900     { background-color: color-mix(in srgb, #38bdf8 16%, transparent); }
+.bg-purple-900  { background-color: color-mix(in srgb, #a78bfa 16%, transparent); }
+.bg-amber-900   { background-color: color-mix(in srgb, #f59e0b 16%, transparent); }
+.bg-indigo-900  { background-color: color-mix(in srgb, #818cf8 16%, transparent); }
+.bg-orange-900  { background-color: color-mix(in srgb, #fb923c 16%, transparent); }
+.bg-red-950     { background-color: color-mix(in srgb, #ef4444 14%, transparent); }
+.text-green-200 { color: #86efac; }
+.text-green-300 { color: #6ee7a0; }
+.text-emerald-300 { color: #5eead4; }
+.text-sky-200, .text-sky-400 { color: #7dd3fc; }
+.text-purple-200 { color: #c4b5fd; }
+.text-amber-200 { color: #fcd34d; }
+.text-orange-300 { color: #fdba74; }
+.text-red-300, .text-red-400 { color: #fca5a5; }
+
+/* Light mode: the *-200/300/400 text shades are tuned for dark surfaces and
+   wash out on white. Override to darker, readable tones. Higher specificity
+   (html.light) wins over the base remaps above. */
+html.light .text-green-200,
+html.light .text-green-300,
+html.light .text-emerald-300 { color: #15803d; }
+html.light .text-sky-200,
+html.light .text-sky-400 { color: #0369a1; }
+html.light .text-purple-200 { color: #6d28d9; }
+html.light .text-amber-200 { color: #92400e; }
+html.light .text-orange-300 { color: #c2410c; }
+html.light .text-red-300,
+html.light .text-red-400 { color: #b91c1c; }
+
+/* Slightly stronger chip tints in light so they read as filled chips */
+html.light .bg-green-900  { background-color: color-mix(in srgb, #22c55e 18%, white); }
+html.light .bg-green-800  { background-color: color-mix(in srgb, #22c55e 26%, white); }
+html.light .bg-sky-900    { background-color: color-mix(in srgb, #0ea5e9 18%, white); }
+html.light .bg-purple-900 { background-color: color-mix(in srgb, #8b5cf6 18%, white); }
+html.light .bg-amber-900  { background-color: color-mix(in srgb, #f59e0b 22%, white); }
+html.light .bg-orange-900 { background-color: color-mix(in srgb, #f97316 18%, white); }
+html.light .bg-indigo-900 { background-color: color-mix(in srgb, #6366f1 16%, white); }
+
+/* Opacity-variant utilities aren't covered by the base remaps */
+.bg-zinc-800\/50 { background-color: color-mix(in srgb, var(--surface-2) 60%, transparent); }
+html.light .bg-zinc-800\/50 { background-color: var(--surface-2); }
+.bg-green-950\/40 { background-color: color-mix(in srgb, #22c55e 12%, transparent); }
+.bg-red-950\/40 { background-color: color-mix(in srgb, #ef4444 12%, transparent); }
+
+/* ---- Scrollbar ---- */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); background-clip: padding-box; }
+::-webkit-scrollbar-track { background: transparent; }
+
+::selection { background: var(--accent-fill); color: var(--text); }
+
+/* ---- Focus ring ---- */
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+button, a { -webkit-tap-highlight-color: transparent; }
+
+/* ---- Animations ---- */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.animate-fade-up { animation: fadeUp 0.28s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.animate-fade-in { animation: fadeIn 0.2s ease both; }
+
+/* Stagger helper for lists */
+.stagger > * { animation: fadeUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.stagger > *:nth-child(1) { animation-delay: 0.02s; }
+.stagger > *:nth-child(2) { animation-delay: 0.04s; }
+.stagger > *:nth-child(3) { animation-delay: 0.06s; }
+.stagger > *:nth-child(4) { animation-delay: 0.08s; }
+.stagger > *:nth-child(5) { animation-delay: 0.10s; }
+.stagger > *:nth-child(6) { animation-delay: 0.12s; }
+.stagger > *:nth-child(7) { animation-delay: 0.14s; }
+.stagger > *:nth-child(8) { animation-delay: 0.16s; }
+
+/* ---- Reusable component primitives ---- */
+.row-hover { transition: background-color 0.14s ease, transform 0.14s ease; }
+.row-hover:hover { background-color: var(--hover); }
+.lift { transition: transform 0.14s ease, box-shadow 0.14s ease; }
+.lift:hover { transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+.press:active { transform: scale(0.97); }
+
+/* Weekly status summary preview: render raw Teams HTML legibly inside the dark panel. */
+.weekly-preview { line-height: 1.5; }
+.weekly-preview p { margin: 0.4rem 0; }
+.weekly-preview ul { list-style: disc; padding-left: 1.25rem; margin: 0.3rem 0; }
+.weekly-preview ul ul { list-style: circle; margin: 0.15rem 0; }
+.weekly-preview li { margin: 0.15rem 0; }
+.weekly-preview strong { color: #e4e4e7; font-weight: 600; }
+.weekly-preview a { color: #93c5fd; text-decoration: underline; }
+.weekly-preview blockquote { border-left: 3px solid #3f3f46; padding-left: 0.6rem; margin: 0.4rem 0; color: #d4d4d8; }

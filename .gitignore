@@ -1,0 +1,23 @@
+# State and secrets never go in the repo
+data/
+*.sqlite3
+*.db
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# OS
+.DS_Store
+
+# Your real config (copy of policy.example.yaml)
+policy.yaml

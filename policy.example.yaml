@@ -1,0 +1,196 @@
+# arc-CoS rules of engagement.  Copy this file to policy.yaml and fill it in.
+#   cp policy.example.yaml policy.yaml
+# policy.yaml is gitignored and hot-reloaded on every sweep (no restart needed).
+
+# ---- You -------------------------------------------------------------------
+me:
+  name: "Your Name"
+  email: "you@yourcompany.com"
+  # Your Entra/Azure AD object id (GUID). Find it: Teams profile, or
+  # `az ad signed-in-user show --query id`, or the ms-graph /me endpoint.
+  aad_id: "00000000-0000-0000-0000-000000000000"
+  # Your role/context, used in the agent's system prompt so its tone fits.
+  role: "an engineering lead"
+  # Your GitHub login(s), lowercased — used to find "your" PRs.
+  github_logins: ["your-gh-login"]
+  # Teams "Chat with yourself" (Notes to self). "48:notes" is the universal id
+  # for every user, so this default works as-is. CoS posts the morning brief and
+  # PR-readiness nudges here.
+  self_chat_id: "48:notes"
+
+work_hours:
+  start: "10:00"
+  end: "19:00"
+  days: [mon, tue, wed, thu, fri]
+  # Timezone is detected from the machine at runtime.
+
+# Tier C senders. Anything from these people is never auto-answered with substance.
+vip:
+  - name: "VIP One"          # e.g. your manager
+    # aad_id: "..."          # optional; name match works too
+  # - name: "VIP Two"
+
+# ---- Integrations ----------------------------------------------------------
+github:
+  owner: "your-github-org"   # GitHub org/owner for PR review, digests, weekly status
+
+azure_devops:
+  # Azure DevOps organization URL. Leave the placeholder if you don't use ADO.
+  org_url: "https://dev.azure.com/your-ado-org"
+
+# ---- Scheduling ------------------------------------------------------------
+schedules:
+  # The agent runs on these days (sweeps never sleep on active days).
+  active_days: [mon, tue, wed, thu, fri]
+  teams_sweep_minutes: 3
+  email_sweep_minutes: 10
+  open_loops_minutes: 15
+  transcripts_sweep_minutes: 15
+  morning_brief: "08:00"
+  evening_shutdown: "18:00"
+
+agents:
+  chief:
+    # Cost-optimal default for the high-volume triage/classification calls.
+    # Accessible Claude models: claude-haiku-4-5-20251001, claude-sonnet-4-6,
+    # claude-opus-4-8. PR review and weekly/roadmap synthesis use Sonnet.
+    model: claude-haiku-4-5-20251001
+
+# WRITE allowlist for Teams. Reading happens everywhere; the agent may only
+# WRITE (auto-replies, holding messages, PR review posts, approved drafts) to
+# conversations matched here. Match by group/meeting chat topic, exact chat id,
+# or person name (1:1 chats). Hot-reloaded; also editable on the board.
+teams_write:
+  allow:
+    - meeting_chats: true     # allow writes to meeting chats (transcript requests)
+    # - topic: "PR review"
+    # - person: "Your Manager"
+    # - chat_id: "19:xxxxxxxx@thread.v2"
+
+messaging:
+  signature: "[sent by my assistant while I'm away]"
+  assistant_attribution: "[from my assistant]"
+  holding_message: >-
+    I'm away from my desk right now. I'll get back to you around {time}.
+    If this is urgent, please mark it as such and I'll be notified.
+  holding_message_delay_minutes: 15
+  # Hard rules enforced in code: never em dashes outbound, email is draft-only,
+  # max 1 auto-reply per conversation per rate_limit_minutes.
+  rate_limit_minutes: 30
+
+away:
+  # Presence values that count as "away". Available/Busy means you're online:
+  # the agent observes and queues but sends nothing automatically.
+  away_when: [Away, BeRightBack, Offline, DoNotDisturb]
+  override: null              # null = follow presence; true/false = forced
+  reply_after_minutes: 20     # only reply on your behalf after you've been away this long
+
+triage:
+  notify_on_urgent: true
+  # Unprompted replies only fire when a message explicitly pings you: a real
+  # @mention in group/meeting chats; in 1:1s a fresh message expecting a reply.
+  reply_only_when_pinged: true
+  auto_reply_max_age_minutes: 60
+
+chieff:
+  # The agent answers when addressed with any of these triggers in any chat it
+  # can read. Case-insensitive plain-text match.
+  trigger: "@cos"
+  triggers: ["@cos", "/cos"]
+  attribution: "~ CoS"        # sign-off; not "- " (Teams renders that as a bullet)
+  emoji: "🤖"                 # badge prefixed to PR check-ins
+  # Autonomy: reply in persona to messages addressed to you in write-allowed
+  # chats. Tier A answers directly; Tier B posts an ack while the real reply
+  # waits in Approvals; Tier C / VIP senders are never touched.
+  autonomy: true
+  online_unseen_minutes: 20   # when you're green, only speak if a ping sat unread this long
+  vip_concierge: true         # careful professional first reply to VIP 1:1s when away
+  vip_attribution: "~ CoS, an AI assistant"
+  daily_update:
+    time: "17:30"
+    max_lines: 10
+    recipients: []            # 1:1 end-of-day status to these people, e.g. ["Your Manager"]
+
+pr_review:
+  # Watch this Teams group chat for GitHub PR links; review each new PR, post
+  # critical findings as a GitHub comment, then post a summary back in the chat.
+  chat_topic: "PR review"
+  sweep_minutes: 5
+  max_diff_chars: 60000
+  digest_time: "09:30"        # daily GitHub pending-work digest
+  # Optional: post the digest to specific Teams channels (ids from Graph). Delete
+  # this block to fall back to chat_topic above.
+  # digest_channels:
+  #   - name: "GitHub Updates"
+  #     team_id: "..."
+  #     channel_id: "19:...@thread.tacv2"
+  attribution: ""             # no disclaimer on PR posts; the emoji is the marker
+
+transcripts:
+  auto_summarize: true        # summarize ended meetings into the daily note
+  ask_in_chat: true           # if no transcript access, ask once in the meeting chat
+
+open_loops:
+  email_unanswered_days: 2
+  checkbox_carry_days: 3
+
+confluence_feed:
+  # Activity feed of pages you follow/author. The REST token is anonymous-scoped,
+  # so query by your explicit Confluence accountId (Atlassian profile URL).
+  account_id: "0000:00000000-0000-0000-0000-000000000000"
+  lookback_days: 30
+
+cost:
+  # Codex (OpenAI) rates for the cost tracker [in_per_million, out_per_million],
+  # matched by model-name fragment. Claude cost is computed automatically.
+  openai_prices: {}
+  #   gpt-5: [1.25, 10.0]
+
+pr_readiness:
+  # CoS checks YOUR own open PRs against your standards and nudges you privately
+  # in your Teams self-chat before you flip a PR to Ready. Never posts on the PR.
+  sweep_minutes: 20
+  repo_prefixes: ["arc-"]     # only your PRs in repos with these name prefixes
+  nudge: true                 # send the self-chat nudge (board shows regardless)
+  renudge_hours: 20
+  # changed paths that count as "new behavior" requiring a test in the same PR
+  test_required_globs:
+    - "src/api/"
+  test_file_markers: ["test", "spec", "__tests__"]
+
+weekly_status:
+  # Weekly status report. CoS gathers the week's merged PRs, ADO refs, daily
+  # notes and synced knowledge, reads last week's Confluence page for format +
+  # carry-forward, and synthesizes a draft. The draft is created UNPUBLISHED;
+  # you approve it on the Weekly Status tab, which publishes the page and posts
+  # the summary to the chat below.
+  repo: "your-main-repo"               # repo whose merged PRs feed the report
+  parent_page_id: "000000000"          # Confluence parent page id for weekly pages
+  space: "SPACEKEY"                    # Confluence space key
+  day: "fri"
+  time: "17:00"
+  leads: "Your Name"
+  base_branch: "main"
+  partner_github_logins: []            # logins counted as a partner/vendor (optional)
+  partner_label: "partner"
+  chat_topic: "Tech Lead chat"         # Teams chat that receives the summary on approval
+  mention: "Recipient Name"            # person tagged at the top of that message
+  attribution: "Auto-compiled by CoS from PRs, ADO items and notes. Reviewed before posting."
+  timeout_seconds: 300
+
+knowledge:
+  # Centralized knowledge in the vault, kept in sync: when a watched Confluence
+  # page or ADO work item changes, CoS re-pulls it and rewrites the matching file.
+  sync_minutes: 30
+  confluence_spaces: ["SPACEKEY"]
+  ado_projects: ["Your ADO Project"]
+  dir: "CoS/Knowledge"
+
+vault:
+  # Path to your Obsidian vault (or any folder of markdown notes).
+  root: "/absolute/path/to/your/Obsidian/vault"
+  daily_dir: "To Do/Daily"             # where daily notes live
+  template: "To Do/Daily/_Day Template.md"
+  chieff_dir: "CoS"                    # CoS's own zone for logs/notes (auto-tagged)
+
+dry_run: true   # default seed; the board toggle writes the live value to the DB.
