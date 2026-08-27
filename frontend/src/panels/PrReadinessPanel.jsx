@@ -1,10 +1,12 @@
-import React from 'react'
+import React, { useState } from 'react'
 import {
   CheckCircle2, XCircle, Clock, ExternalLink, ShieldAlert, GitPullRequestDraft,
-  GitPullRequest,
+  GitPullRequest, User, RefreshCw,
 } from 'lucide-react'
 import { Panel } from '../App.jsx'
 import { Empty } from './AdoPanel.jsx'
+import { post } from '../api.js'
+import { useToast } from '../ui.jsx'
 
 const repoOf = (url) => {
   const m = String(url).match(/github\.com\/[^/]+\/([^/]+)\/pull\/(\d+)/)
@@ -26,20 +28,46 @@ function CheckPill({ c }) {
   )
 }
 
-export default function PrReadinessPanel({ board }) {
+export default function PrReadinessPanel({ board, refresh }) {
+  const toast = useToast()
+  const [checking, setChecking] = useState(false)
   const data = board?.pr_readiness || { prs: [] }
   const prs = data.prs || []
   // needs-attention first, then drafts, then ready
   const sorted = [...prs].sort((a, b) => (b.needs_attention ? 1 : 0) - (a.needs_attention ? 1 : 0))
+
+  const runCheck = async () => {
+    setChecking(true)
+    try {
+      await post('/api/sweep/pr_readiness')
+      toast('PR readiness check done', 'success')
+      refresh()
+    } catch (e) {
+      toast(`Check failed: ${String(e).slice(0, 120)}`, 'error')
+    } finally {
+      setChecking(false)
+    }
+  }
 
   return (
     <Panel
       title="PR readiness"
       badge={prs.length}
       actions={
-        <span className="text-[11px] text-zinc-500">
-          {data.needs_attention || 0} need attention
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-zinc-500">
+            {data.needs_attention || 0} need attention
+          </span>
+          <button
+            onClick={runCheck}
+            disabled={checking}
+            className="press flex items-center gap-1 rounded-lg bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-700 disabled:opacity-40"
+            title="Run a fresh readiness check now"
+          >
+            <RefreshCw size={10} className={checking ? 'animate-spin' : ''} />
+            {checking ? 'Checking…' : 'Run check'}
+          </button>
+        </div>
       }
     >
       <div className="stagger space-y-1.5">
@@ -57,6 +85,11 @@ export default function PrReadinessPanel({ board }) {
                 <Icon size={15} className={r.is_draft ? 'text-zinc-400' : 'text-emerald-400'} />
                 <span className="shrink-0 font-medium text-zinc-200">{repoOf(r.url)}</span>
                 <span className="truncate text-zinc-400">{r.title}</span>
+                {r.owner && (
+                  <span className="flex shrink-0 items-center gap-1 rounded-md bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400" title={`PR owner: ${r.owner}`}>
+                    <User size={10} /> {r.owner}
+                  </span>
+                )}
                 {r.needs_attention ? (
                   <span className="ml-auto flex shrink-0 items-center gap-1 rounded-md bg-red-950 px-2 py-0.5 text-[10px] text-red-300 ring-1 ring-red-900">
                     <ShieldAlert size={11} /> not ready

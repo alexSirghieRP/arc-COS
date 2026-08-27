@@ -63,20 +63,38 @@ def parse_note(text: str) -> dict:
     return sections
 
 
+_note_cache: dict = {}  # date_iso -> (mtime, parsed_dict)
+
+
 def read_note(d: date) -> dict | None:
     p = note_path(d)
     if not p.exists():
         return None
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return None
+    key = d.isoformat()
+    cached = _note_cache.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
     text = p.read_text()
     sections = parse_note(text)
-    return {
-        "date": d.isoformat(),
+    result = {
+        "date": key,
         "path": str(p),
         "sections": {
             name: {"checkboxes": s["checkboxes"], "text": "\n".join(s["lines"]).strip()}
             for name, s in sections.items()
         },
     }
+    _note_cache[key] = (mtime, result)
+    return result
+
+
+def invalidate_note_cache(d: date) -> None:
+    """Call after any write to today's note so the next read_note is fresh."""
+    _note_cache.pop(d.isoformat(), None)
 
 
 def toggle_checkbox(d: date, line_no: int, checked: bool) -> bool:
@@ -91,6 +109,25 @@ def toggle_checkbox(d: date, line_no: int, checked: bool) -> bool:
     mark = "x" if checked else " "
     lines[line_no] = f"{m.group(1)}- [{mark}] {m.group(3)}\n"
     p.write_text("".join(lines))
+    invalidate_note_cache(d)
+    return True
+
+
+def edit_checkbox_text(d: date, line_no: int, text: str) -> bool:
+    """Rewrite a checkbox line's text (HITL edit), keeping its indent + checked
+    state. Returns False if the line is not a checkbox at that number."""
+    p = note_path(d)
+    lines = p.read_text().splitlines(keepends=True)
+    if line_no >= len(lines):
+        return False
+    m = CHECKBOX_RE.match(lines[line_no].rstrip("\n"))
+    if not m:
+        return False
+    mark = "x" if m.group(2).lower() == "x" else " "
+    new = text.strip().replace("\n", " ")
+    lines[line_no] = f"{m.group(1)}- [{mark}] {new}\n"
+    p.write_text("".join(lines))
+    invalidate_note_cache(d)
     return True
 
 
@@ -118,6 +155,7 @@ def append_to_section(d: date, section: str, content: str) -> bool:
     insert = content.rstrip("\n").splitlines()
     lines[end:end] = insert + [""]
     p.write_text("\n".join(lines) + "\n")
+    invalidate_note_cache(d)
     return True
 
 
@@ -129,6 +167,7 @@ def create_note(d: date, body: str | None = None) -> Path:
             "{{date}}", f"{d.isoformat()} {d.strftime('%A')}"
         )
         p.write_text(text)
+        invalidate_note_cache(d)
     return p
 
 

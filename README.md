@@ -39,6 +39,31 @@ what (if anything) is sent.
 - **Meeting summaries**, **open-loop tracking**, **knowledge sync** (Confluence/ADO →
   vault), and a **cost tab** that meters exactly what CoS spends to run.
 
+## New in this release
+
+- **Companion chat** — a conversational sidekick on the board with persistent memory
+  (facts, preferences, corrections — "remember that…", "forget…"), mood-aware tone,
+  proactive nudges when tracked state changes, and a provider/model picker
+  (Claude or Codex CLI).
+- **Agent swarm** — ephemeral read-only workers fan out over ADO work items and PRs,
+  judge each against the runbooks in `runbooks/` (investigate, code plan, PR
+  review / health / status), and pin a verdict matrix to the board.
+- **Desktop agent** — a guarded local-exec surface: allowlisted project roots,
+  path-traversal/symlink/sensitive-file blocking, secret redaction, command risk
+  classes, and a confirmation gate before anything destructive runs.
+- **Watchers** — configurable monitors over Teams chats and scheduler jobs with
+  free-text guardrails; they only observe, emitting info/attention/urgent events
+  to the board.
+- **Pipeline monitor** — the `osca` module traces a deployed agent pipeline through
+  its backing Firestore state (escalations, blocked flows, failing checks) and feeds
+  board alerts plus the macOS app's menu-bar dot and Dock badge.
+- **Arch map** — a zoomable architecture map of your agentic systems (galaxy view
+  with per-use-case drill-down) rendered on the board.
+- **macOS app** — `macos/` wraps the board in a native app: it starts/stops the
+  backend, keeps external links in your browser, and surfaces pipeline health as a
+  menu-bar dot, Dock badge, and native notifications. Build with
+  `./macos/build.sh` (add `--install` to copy to /Applications and launch).
+
 ## Guardrails (enforced in `backend/app/actions.py`, the only send path)
 
 - Kill switch and a **dry-run default** (flip both on the board).
@@ -56,6 +81,8 @@ what (if anything) is sent.
 backend/   FastAPI (Python 3.13, uv). MCP sessions + Claude Agent SDK + APScheduler.
            SQLite at data/ (gitignored). All rules live in policy.yaml (hot-reloaded).
 frontend/  React + Vite + Tailwind control tower, served by the backend at :7777.
+macos/     Optional native shell app (WKWebView + menu-bar status + notifications).
+runbooks/  The check definitions the agent swarm runs against tickets and PRs.
 policy.example.yaml  → copy to policy.yaml and fill in. The only config you edit.
 ```
 

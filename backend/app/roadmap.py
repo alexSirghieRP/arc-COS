@@ -79,6 +79,69 @@ ROADMAP_SCHEMA = {
                 "gate": {"type": "boolean", "description": "true = hard gate"},
             },
             "required": ["week", "label"]}},
+        "exec_status": {
+            "type": "object",
+            "description": "High-level RAG status for execs: overall + per-week + per-lane.",
+            "properties": {
+                "overall": {"type": "string", "enum": ["green", "amber", "red"]},
+                "headline": {"type": "string", "description": "one line an exec reads in 5 seconds"},
+                "weeks": {"type": "array", "items": {
+                    "type": "object",
+                    "properties": {
+                        "week": {"type": "string"},
+                        "rag": {"type": "string", "enum": ["green", "amber", "red"]},
+                        "note": {"type": "string", "description": "<= 8 words, why this color"},
+                    },
+                    "required": ["week", "rag"]}},
+                "lanes": {"type": "array", "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "rag": {"type": "string", "enum": ["green", "amber", "red"]},
+                        "note": {"type": "string"},
+                    },
+                    "required": ["name", "rag"]}},
+            },
+        },
+        "scorecard": {
+            "type": "object",
+            "description": "Exec delivery scorecard: categorized RAG + capacity + risks.",
+            "properties": {
+                "title": {"type": "string"},
+                "week_of": {"type": "string"},
+                "target": {"type": "string", "description": "e.g. 'UAT W7 · Go-live W8'"},
+                "overall": {"type": "string", "enum": ["green", "amber", "red"]},
+                "summary": {"type": "string"},
+                "risks_rag": {"type": "string", "enum": ["green", "amber", "red", "grey"]},
+                "capacity": {
+                    "type": "object",
+                    "properties": {
+                        "rag": {"type": "string", "enum": ["green", "amber", "red", "grey"]},
+                        "note": {"type": "string"},
+                        "columns": {"type": "array", "items": {
+                            "type": "object",
+                            "properties": {"title": {"type": "string"}, "desc": {"type": "string"}},
+                            "required": ["title"]}},
+                        "ask": {"type": "string"},
+                    },
+                },
+                "risks": {"type": "array", "items": {"type": "string"}},
+                "categories": {"type": "array", "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "items": {"type": "array", "items": {
+                            "type": "object",
+                            "properties": {
+                                "rag": {"type": "string", "enum": ["green", "amber", "red", "grey"]},
+                                "name": {"type": "string"},
+                                "note": {"type": "string"},
+                            },
+                            "required": ["rag", "name"]}},
+                    },
+                    "required": ["name", "items"]}},
+            },
+        },
         "footer": {"type": "string"},
     },
     "required": ["title", "weeks", "here_week", "sections"],
@@ -89,6 +152,9 @@ SETTING_KEY = "os_conversions_roadmap"
 
 # Seed so the control-tower preview renders before the agent drafts a real one.
 # Grouped sections with owners + week-positioned bars, mirroring the design.
+# All of this is placeholder/sample content — the real roadmap, exec status,
+# and scorecard are expected to be drafted by the agent ('Draft from data')
+# and maintained via the board (HITL), persisted under SETTING_KEY.
 SEED = {
     "title": "Rough Timeline",
     "subtitle": "Example roadmap · edit on the board or run 'Draft from data'",
@@ -123,7 +189,66 @@ SEED = {
         {"week": "W4", "label": "Checkpoint", "gate": False},
         {"week": "W8", "label": "Go-live (hard)", "gate": True},
     ],
-    "footer": "Rough order-of-magnitude, not a committed date. Drafted by CoS; reviewed by you.",
+    "exec_status": {
+        "overall": "amber",
+        "headline": "Build on track; cutover prep is the open risk. (Sample data — edit or draft.)",
+        "weeks": [
+            {"week": "W1", "rag": "green", "note": "design done"},
+            {"week": "W2", "rag": "green", "note": "design signed off"},
+            {"week": "W3", "rag": "green", "note": "implementation started"},
+            {"week": "W4", "rag": "amber", "note": "integration spike begins"},
+            {"week": "W5", "rag": "amber", "note": "implementation lands"},
+            {"week": "W6", "rag": "amber", "note": "hardening rides on spike"},
+            {"week": "W7", "rag": "red", "note": "cutover prep unscoped"},
+            {"week": "W8", "rag": "red", "note": "go-live gate at risk"},
+        ],
+        "lanes": [
+            {"name": "Workstream A", "rag": "green", "note": "implementation on track"},
+            {"name": "Workstream B", "rag": "amber", "note": "integration spike in flight"},
+            {"name": "UAT & cutover", "rag": "red", "note": "cutover prep not yet scoped"},
+        ],
+    },
+    "scorecard": {
+        "title": "Example Project — Delivery Scorecard",
+        "week_of": "Week 3",
+        "target": "UAT W7 · Go-live W8",
+        "overall": "amber",
+        "summary": "Placeholder scorecard so the preview renders out of the box. "
+                   "Run 'Draft from data' or edit on the board to replace it.",
+        "risks_rag": "amber",
+        "capacity": {
+            "rag": "amber",
+            "note": "Not blocked, owned and in progress. The risk is bandwidth and lead-time on a few owners.",
+            "columns": [
+                {"title": "Test environment access", "desc": "owned, must land before UAT starts or the date slips"},
+                {"title": "Deploy pipeline fix", "desc": "in review; blocks a clean cutover rehearsal"},
+            ],
+            "ask": "Prioritize test-environment access so UAT can start on time.",
+        },
+        "risks": [
+            "Outbound messages must stay draft-only (HITL) until sign-off.",
+            "Edge-case inputs can under-read; tripwire shipped, full fix in progress.",
+        ],
+        "categories": [
+            {"name": "A. Functional", "items": [
+                {"rag": "green", "name": "Intake & orchestration", "note": ""},
+                {"rag": "amber", "name": "Communications", "note": "routing fix in review"},
+                {"rag": "amber", "name": "Document parsing", "note": "edge datasets still open"},
+            ]},
+            {"name": "B. Non-Functional", "items": [
+                {"rag": "green", "name": "CI/CD", "note": ""},
+                {"rag": "amber", "name": "Security", "note": "service auth review open"},
+                {"rag": "grey", "name": "Performance", "note": "next phase"},
+            ]},
+            {"name": "C. AI Governance", "items": [
+                {"rag": "amber", "name": "HITL (human-in-the-loop)", "note": ""},
+                {"rag": "amber", "name": "Evals", "note": "expanding coverage"},
+                {"rag": "green", "name": "Observability", "note": ""},
+            ]},
+        ],
+    },
+    "footer": "Rough order-of-magnitude, not a committed date. Calendar weeks approximate. "
+              "Drafted by CoS from PRs/ADO/notes; reviewed by you.",
 }
 
 
@@ -386,20 +511,109 @@ def render_print_html(rm: dict) -> str:
     return "".join(p)
 
 
-async def to_pdf(rm: dict) -> bytes:
-    """Render the print HTML to a landscape PDF via headless Chromium."""
+async def _html_to_pdf(html_doc: str, fmt: str = "A3", landscape: bool = True) -> bytes:
+    """Render a standalone HTML doc to PDF via headless Chromium."""
     from playwright.async_api import async_playwright
-    html_doc = render_print_html(rm)
     async with async_playwright() as pw:
         browser = await pw.chromium.launch()
         try:
             page = await browser.new_page()
             await page.set_content(html_doc, wait_until="networkidle")
-            pdf = await page.pdf(format="A3", landscape=True, print_background=True,
-                                 margin={"top": "0", "bottom": "0", "left": "0", "right": "0"})
+            pdf = await page.pdf(format=fmt, landscape=landscape, print_background=True,
+                                 margin={"top": "12", "bottom": "12", "left": "12", "right": "12"})
         finally:
             await browser.close()
     return pdf
+
+
+async def to_pdf(rm: dict) -> bytes:
+    """Roadmap timeline -> landscape PDF."""
+    return await _html_to_pdf(render_print_html(rm), fmt="A3", landscape=True)
+
+
+async def scorecard_to_pdf(rm: dict) -> bytes:
+    """Delivery scorecard -> landscape A4 PDF."""
+    return await _html_to_pdf(render_scorecard_html(rm.get("scorecard") or {}, rm.get("here_week", "")),
+                              fmt="A4", landscape=True)
+
+
+# RAG palette for the scorecard print (light theme).
+_SC_RAG = {
+    "green": ("#2f8f5b", "G", "GREEN", "built &amp; on track"),
+    "amber": ("#c98a1e", "A", "AMBER", "at risk, mitigating"),
+    "red":   ("#b23b2e", "R", "RED", "off track"),
+    "grey":  ("#6b7280", "–", "GREY", "not in this phase"),
+}
+
+
+def render_scorecard_html(sc: dict, here: str = "") -> str:
+    """Standalone LIGHT print HTML for the delivery scorecard (matches the board)."""
+    def dot(r):
+        c, g, _, _ = _SC_RAG.get(r, _SC_RAG["amber"])
+        return (f'<span style="display:inline-grid;place-items:center;width:16px;height:16px;'
+                f'border-radius:50%;background:{c};color:#1a1a1a;font-size:9px;font-weight:700;'
+                f'vertical-align:middle;">{g}</span>')
+    ov = _SC_RAG.get(sc.get("overall", "amber"), _SC_RAG["amber"])
+    p = ['<!doctype html><html><head><meta charset="utf-8"><style>',
+         "*{box-sizing:border-box}"
+         "body{font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;color:#172B4D;margin:0;font-size:11px;}"
+         ".hdr{background:#1e2a4a;color:#fff;display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-radius:6px;}"
+         ".hdr h1{margin:0;font-size:17px;} .hdr .meta{text-align:right;font-size:10px;color:#c7d0e0;}"
+         ".ovl{background:" + ov[0] + ";color:#1a1a1a;font-weight:700;padding:5px 10px;border-radius:5px;font-size:11px;margin-left:12px;}"
+         ".summary{font-style:italic;color:#42526e;margin:10px 2px;}"
+         ".box{border:1px solid #e6c478;background:#fdf6e3;border-radius:8px;padding:10px 12px;margin:8px 0;}"
+         ".box h4{margin:0 0 2px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#9a6b00;}"
+         ".risks{border:1px solid #e6c478;border-left:3px solid #c98a1e;background:#fdf8ee;border-radius:6px;padding:8px 12px;margin:8px 0;}"
+         ".cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px;margin-top:10px;}"
+         ".cat h3{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#1e3a8a;border-bottom:1px solid #c7ced9;padding-bottom:3px;margin:0 0 6px;}"
+         ".item{display:flex;gap:7px;align-items:flex-start;margin:5px 0;}"
+         ".item b{font-size:11px;} .item .n{font-size:9.5px;color:#6b7280;}"
+         ".legend{border-top:1px solid #dfe1e6;margin-top:12px;padding-top:6px;font-size:9.5px;color:#6b7280;display:flex;gap:16px;flex-wrap:wrap;}"
+         "</style></head><body>"]
+    p.append('<div class="hdr"><h1>' + _esc(sc.get("title", "Delivery Scorecard")) + '</h1>'
+             '<div style="display:flex;align-items:center;">'
+             f'<div class="meta">Week of {_esc(sc.get("week_of",""))}<br>Target: {_esc(sc.get("target",""))}</div>'
+             f'<span class="ovl">OVERALL {ov[2]}</span></div></div>')
+    if sc.get("summary"):
+        p.append(f'<div class="summary">{_esc(sc["summary"])}</div>')
+    cap = sc.get("capacity") or {}
+    if cap:
+        cc = _SC_RAG.get(cap.get("rag", "amber"), _SC_RAG["amber"])[0]
+        p.append(f'<div class="box" style="border-color:{cc};background:{cc}14;">'
+                 f'<h4 style="color:{cc};">Critical-path dependencies &amp; capacity</h4>')
+        if cap.get("note"):
+            p.append(f'<div style="font-style:italic;color:#9a7b3a;font-size:10px;">{_esc(cap["note"])}</div>')
+        cols = cap.get("columns") or []
+        if cols:
+            p.append('<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:6px;">')
+            for c in cols:
+                p.append(f'<div><b style="font-size:11px;">{_esc(c.get("title"))}</b>'
+                         f'<div style="font-size:10px;color:#5b6b7f;">{_esc(c.get("desc",""))}</div></div>')
+            p.append('</div>')
+        if cap.get("ask"):
+            p.append(f'<div style="margin-top:6px;font-weight:600;color:#9a6b00;font-size:10.5px;">ASK: {_esc(cap["ask"])}</div>')
+        p.append('</div>')
+    if sc.get("risks"):
+        rc = _SC_RAG.get(sc.get("risks_rag", "amber"), _SC_RAG["amber"])[0]
+        p.append(f'<div class="risks" style="border-color:{rc};border-left-color:{rc};background:{rc}10;">'
+                 f'<h4 style="margin:0 0 3px;font-size:11px;text-transform:uppercase;color:{rc};">Risks &mdash; we own, managing</h4><ul style="margin:0;padding-left:15px;">')
+        for r in sc["risks"]:
+            p.append(f'<li style="font-size:10px;color:#5b4a1f;margin:1px 0;">{_esc(r)}</li>')
+        p.append('</ul></div>')
+    p.append('<div class="cols">')
+    for cat in sc.get("categories") or []:
+        p.append(f'<div class="cat"><h3>{_esc(cat.get("name"))}</h3>')
+        for it in cat.get("items") or []:
+            note = f'<div class="n">{_esc(it.get("note"))}</div>' if it.get("note") else ""
+            p.append(f'<div class="item">{dot(it.get("rag","amber"))}<div><b>{_esc(it.get("name"))}</b>{note}</div></div>')
+        p.append('</div>')
+    p.append('</div>')
+    p.append('<div class="legend">')
+    for c, g, lab, desc in _SC_RAG.values():
+        p.append(f'<span>{dot([k for k,v in _SC_RAG.items() if v[2]==lab][0])} <b>{lab}</b> = {desc}</span>')
+    p.append(f'<span style="margin-left:auto;font-style:italic;">Updated by CoS · {_esc(here)}</span></div>')
+    p.append('</body></html>')
+    return "".join(p)
 
 
 DRAFT_PROMPT = """You maintain the user's rough-timeline roadmap (a swimlane Gantt).
@@ -411,6 +625,13 @@ structure and edits; do not invent work. Rules:
 - Refresh callouts.what_changed (3-5 bullets from merged PRs / notes) and callouts.rides_on
   (top risks/blockers). No em dashes.
 - Keep weeks/months consistent (month spans sum to number of weeks). Keep it rough.
+- Update exec_status (RAG for high execs): set overall (green/amber/red) and a 5-second
+  headline; give every week a rag + <=8-word note; give each section a current rag + note.
+  green = on track / landed, amber = at risk or rides on a dependency, red = blocked or a
+  gate is unlikely without intervention. Be honest, not optimistic.
+- Update the scorecard (exec delivery scorecard): overall RAG + summary; capacity columns +
+  ask (critical-path dependencies bottlenecked on owners); risks (owned/managing); and each
+  category's items with rag (green/amber/red, or grey = not in this phase) + a short note.
 Return the FULL updated roadmap JSON.
 
 === CURRENT ROADMAP ===

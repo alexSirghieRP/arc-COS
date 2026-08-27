@@ -7,11 +7,7 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-# Your real config is policy.yaml (gitignored). policy.example.yaml is the
-# committed template; we fall back to it so a fresh clone boots before you copy it.
 POLICY_PATH = REPO_ROOT / "policy.yaml"
-if not POLICY_PATH.exists():
-    POLICY_PATH = REPO_ROOT / "policy.example.yaml"
 DATA_DIR = REPO_ROOT / "data"
 DB_PATH = DATA_DIR / "chief.sqlite3"
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"

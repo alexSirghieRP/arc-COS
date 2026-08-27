@@ -32,7 +32,7 @@ async def summarize_into_note(day_s: str, subject: str, chat_id: str | None) -> 
 
     chat_lines: list[str] = []
     if chat_id is None:
-        chats = await graph.list_chats(top=50)
+        chats = await graph.chats_cached()
         for c in chats:
             if c.get("chatType") == "meeting" and (c.get("topic") or "").strip().lower() == subject.strip().lower():
                 chat_id = c["id"]

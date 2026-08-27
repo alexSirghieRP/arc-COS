@@ -5,6 +5,9 @@ data/
 .env
 .env.*
 
+# Your real config (copy of policy.example.yaml)
+policy.yaml
+
 # Python
 __pycache__/
 *.pyc
@@ -16,8 +19,9 @@ __pycache__/
 node_modules/
 frontend/dist/
 
+# macOS app build output
+macos/dist/
+
 # OS
 .DS_Store
-
-# Your real config (copy of policy.example.yaml)
-policy.yaml
+.claude/settings.local.json

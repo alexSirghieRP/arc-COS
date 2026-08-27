@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import {
   ChevronRight, UserCheck, AlertTriangle, Clock, CheckCircle2, FileEdit,
-  ExternalLink, MinusCircle, PlusCircle, MessageSquare,
+  ExternalLink, MinusCircle, PlusCircle, MessageSquare, FolderGit2, SlidersHorizontal,
 } from 'lucide-react'
 import { Panel } from '../App.jsx'
 import { Empty } from './AdoPanel.jsx'
@@ -25,6 +25,10 @@ export default function PrApprovalsPanel() {
   const [prs, setPrs] = useState([])
   const [open, setOpen] = useState(null)
   const [busy, setBusy] = useState(null)
+  const [repos, setRepos] = useState([])
+  const [repoBusy, setRepoBusy] = useState(null)
+  const [showRepos, setShowRepos] = useState(false)
+  const [resweeping, setResweeping] = useState(false)
 
   const load = () =>
     fetch('/api/pr-approvals')
@@ -32,8 +36,15 @@ export default function PrApprovalsPanel() {
       .then((d) => setPrs(Array.isArray(d) ? d : []))
       .catch(() => setPrs([]))
 
+  const loadRepos = () =>
+    fetch('/api/repos')
+      .then((r) => r.json())
+      .then((d) => setRepos(Array.isArray(d) ? d : []))
+      .catch(() => setRepos([]))
+
   useEffect(() => {
     load()
+    loadRepos()
     const t = setInterval(load, 30000)
     return () => clearInterval(t)
   }, [])
@@ -48,13 +59,69 @@ export default function PrApprovalsPanel() {
     }
   }
 
+  const toggleRepo = async (r) => {
+    setRepoBusy(r.name)
+    try {
+      await post('/api/repos', { repo: r.name, enabled: !r.enabled })
+      await loadRepos()
+      // Re-sweep now so a disabled repo's PRs drop out of the queue immediately
+      // instead of waiting for the next scheduled pr_status run (~15m).
+      setResweeping(true)
+      await post('/api/sweep/pr_status', {})
+      await load()
+    } finally {
+      setRepoBusy(null)
+      setResweeping(false)
+    }
+  }
+
   const inQueue = prs.filter((p) => p.in_queue).length
+  const reposOn = repos.filter((r) => r.enabled).length
   return (
     <Panel
       title="PR approvals"
       badge={prs.length}
-      actions={<span className="text-[11px] text-zinc-500">{inQueue} in queue</span>}
+      actions={
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-zinc-500">{inQueue} in queue</span>
+          <button
+            onClick={() => setShowRepos((s) => !s)}
+            className={`press flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] ${
+              showRepos ? 'bg-zinc-700 text-zinc-100' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+            }`}
+          >
+            <SlidersHorizontal size={12} /> Repos ({reposOn}/{repos.length})
+          </button>
+        </div>
+      }
     >
+      {showRepos && (
+        <div className="animate-fade-in mb-3 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+          <p className="mb-2 text-[11px] text-zinc-500">
+            Only repos toggled on here are tracked in this queue (and get Chieff's automated
+            review). Turning a repo off {resweeping ? '— re-syncing…' : 'removes its PRs after a quick re-sync.'}
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {repos.map((r) => (
+              <button
+                key={r.name}
+                onClick={() => toggleRepo(r)}
+                disabled={repoBusy === r.name}
+                title={r.enabled ? 'Tracked — click to stop tracking' : 'Not tracked — click to track'}
+                className={`press flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] disabled:opacity-40 ${
+                  r.enabled
+                    ? 'border-[var(--accent-strong)] bg-[var(--accent-fill)] text-zinc-100'
+                    : 'border-zinc-800 bg-zinc-900 text-zinc-500'
+                }`}
+              >
+                <FolderGit2 size={11} className="shrink-0" />
+                {r.name}
+              </button>
+            ))}
+            {repos.length === 0 && <span className="text-[11px] text-zinc-600">no repos found</span>}
+          </div>
+        </div>
+      )}
       <div className="stagger space-y-1.5">
         {prs.length === 0 && <Empty text="No open PRs tracked yet" />}
         {prs.map((pr) => {

@@ -1,7 +1,7 @@
 [project]
-name = "arc-cos-backend"
+name = "chief-backend"
 version = "0.1.0"
-description = "arc-CoS backend: FastAPI + MCP + Claude Agent SDK"
+description = "Add your description here"
 requires-python = ">=3.13"
 dependencies = [
     "apscheduler>=3.11.2",

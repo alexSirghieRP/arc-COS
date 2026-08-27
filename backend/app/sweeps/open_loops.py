@@ -4,6 +4,7 @@ Loops live in items as type='open_loop' with subject=kind. Each sweep upserts
 the currently-true loops and closes the ones that no longer hold.
 """
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
 
@@ -31,37 +32,27 @@ async def sweep() -> dict:
 
     # 1. Emails that asked the user something and got no reply in N+ days
     email_days = cfg.get("email_unanswered_days", 2)
-    rows = db.query(
+    email_rows = db.query(
         "SELECT * FROM items WHERE source='email' AND tier IN ('B','C') "
         "AND status IN ('classified','drafted') AND received_at < ?",
         (db.cutoff(days=int(email_days)),))
-    for r in rows:
-        seen.add(_loop("email_unanswered", r["external_id"][:40],
-                       f"{r['sender']}: {r['subject']}", r["received_at"]))
 
     # 2. Teams mentions the user went silent on (no reply, 1+ day old)
-    rows = db.query(
+    mention_rows = db.query(
         "SELECT * FROM items WHERE source='teams_chat' AND type='mention' "
         "AND status IN ('classified','drafted','held') AND received_at < ?",
         (db.cutoff(days=1),))
-    for r in rows:
-        seen.add(_loop("silent_mention", r["external_id"][:40],
-                       f"{r['sender']} in {r['subject']}: {(r['content'] or '')[:120]}",
-                       r["received_at"]))
 
-    # 3 + 4. PRs awaiting my review / my PRs stuck awaiting others
-    for pr in await state._gh_prs(["--review-requested=@me"]):
-        seen.add(_loop("pr_awaiting_me", pr["url"],
-                       f"{pr['repository']['nameWithOwner']}: {pr['title']}", pr["updatedAt"]))
-    for pr in await state._gh_prs(["--author=@me"]):
-        updated = datetime.fromisoformat(pr["updatedAt"].replace("Z", "+00:00"))
-        if datetime.now(timezone.utc) - updated > timedelta(days=2):
-            seen.add(_loop("my_pr_stuck", pr["url"],
-                           f"{pr['repository']['nameWithOwner']}: {pr['title']}", pr["updatedAt"]))
+    # 3 + 4. PRs awaiting my review / my PRs stuck awaiting others (concurrent)
+    prs_me, prs_author = await asyncio.gather(
+        state._gh_prs(["--review-requested=@me"]),
+        state._gh_prs(["--author=@me"]),
+    )
 
     # 5. Checkboxes carried unchecked across N+ days of notes
     carry_days = cfg.get("checkbox_carry_days", 3)
     recent = vault.most_recent_note()
+    checkbox_loops: list[tuple[str, date]] = []
     if recent:
         latest_date, _ = recent
         latest_unchecked = set(vault.unchecked_items(latest_date))
@@ -76,18 +67,44 @@ async def sweep() -> dict:
                 d -= timedelta(days=1)
             for text, since in first_seen.items():
                 if (latest_date - since).days >= carry_days:
-                    seen.add(_loop("carried_checkbox", text[:60],
-                                   f"unchecked since {since.isoformat()}: {text}",
-                                   since.isoformat() + "T00:00:00+00:00"))
+                    checkbox_loops.append((text, since))
 
-    # Close loops that no longer hold
+    # Batch all loop upserts in a single transaction (was N individual commits).
+    with db.transaction():
+        for r in email_rows:
+            seen.add(_loop("email_unanswered", r["external_id"][:40],
+                           f"{r['sender']}: {r['subject']}", r["received_at"]))
+        for r in mention_rows:
+            seen.add(_loop("silent_mention", r["external_id"][:40],
+                           f"{r['sender']} in {r['subject']}: {(r['content'] or '')[:120]}",
+                           r["received_at"]))
+        for pr in prs_me:
+            seen.add(_loop("pr_awaiting_me", pr["url"],
+                           f"{pr['repository']['nameWithOwner']}: {pr['title']}", pr["updatedAt"]))
+        for pr in prs_author:
+            updated = datetime.fromisoformat(pr["updatedAt"].replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) - updated > timedelta(days=2):
+                seen.add(_loop("my_pr_stuck", pr["url"],
+                               f"{pr['repository']['nameWithOwner']}: {pr['title']}", pr["updatedAt"]))
+        for text, since in checkbox_loops:
+            seen.add(_loop("carried_checkbox", text[:60],
+                           f"unchecked since {since.isoformat()}: {text}",
+                           since.isoformat() + "T00:00:00+00:00"))
+
+    # Close loops that no longer hold: 1 batch UPDATE + N audits in one transaction.
     open_now = db.query("SELECT id, external_id FROM items WHERE type='open_loop' AND status != 'done'")
-    closed = 0
-    for r in open_now:
-        if r["external_id"] not in seen:
-            db.update_item(r["id"], status="done", action_taken="loop closed")
-            db.audit("loop_closed", {"loop": r["external_id"]}, item_id=r["id"])
-            closed += 1
+    to_close = [r for r in open_now if r["external_id"] not in seen]
+    closed = len(to_close)
+    if to_close:
+        ids = [r["id"] for r in to_close]
+        ph = ",".join("?" * len(ids))
+        with db.transaction():
+            db.execute(
+                f"UPDATE items SET status='done', action_taken='loop closed', updated_at=? "
+                f"WHERE id IN ({ph})",
+                (db.now(),) + tuple(ids))
+            for r in to_close:
+                db.audit("loop_closed", {"loop": r["external_id"]}, item_id=r["id"])
 
     log.info("open loops: %d open, %d closed", len(seen), closed)
     return {"open": len(seen), "closed": closed}
@@ -101,9 +118,9 @@ FOLLOWUP_SCHEMA = {
     "required": ["draft"],
 }
 
-FOLLOWUP_PROMPT = """the user has not replied to this for a while. Draft a short follow-up reply
-on his behalf, for his approval (it will NOT be sent automatically). Friendly, brief,
-plain language, moves the thread forward or politely buys time honestly. Never use em dashes.
+FOLLOWUP_PROMPT = """The user has not replied to this for a while. Draft a follow-up reply on their behalf for their approval (NOT sent automatically).
+
+The user's style: direct, first person, states their position plainly. When they're following up on something outstanding, they're matter-of-fact about it — no "I hope this finds you well", no filler. If they owe someone an update, they give it straight. If they need something from the other person, they ask directly. Never use em dashes.
 
 Channel: {channel}
 From: {sender}
@@ -112,13 +129,15 @@ Context: {content}
 
 
 async def _run_pr_review_loop(loop: dict) -> str:
-    from .pr_review import _find_chat_id, _review_one
+    from .pr_review import _find_chat_id, _review_one, paused
     from .. import graph
+    if paused():
+        return "pr_review is paused (tuning); cannot run from loop panel"
     from ..config import policy as _policy
     url = loop["external_id"].split(":", 1)[1]
     cfg = _policy().get("pr_review", {})
     topic = cfg.get("chat_topic")
-    chat_id = _find_chat_id(await graph.list_chats(top=50), topic) if topic else None
+    chat_id = _find_chat_id(await graph.chats_cached(), topic) if topic else None
     if not chat_id:
         return "pr_review chat not found; cannot post review"
     item_id, is_new = db.upsert_item(
@@ -179,15 +198,26 @@ async def _draft_followup(loop: dict, kind: str) -> str:
 
 async def run_selected(ids: list[int]) -> dict:
     """Act on chosen open loops from the board. Every outbound step goes
-    through actions.py, so kill switch, dry run and allowlists all apply."""
+    through actions.py, so kill switch, dry run and allowlists all apply.
+    All loops are acted on concurrently — each targets a different item/thread
+    so there is no cross-loop interference."""
     from .. import actions
-    results = []
-    for item_id in ids:
-        rows = db.query("SELECT * FROM items WHERE id=? AND type='open_loop'", (item_id,))
-        if not rows:
-            results.append({"id": item_id, "kind": None, "result": "not found"})
-            continue
-        loop = rows[0]
+
+    if not ids:
+        return {"results": []}
+
+    rows_by_id = {
+        r["id"]: r
+        for r in db.query(
+            "SELECT * FROM items WHERE id IN (%s) AND type='open_loop'"
+            % ",".join("?" * len(ids)),
+            tuple(ids))
+    }
+
+    async def _run_one(item_id: int) -> dict:
+        if item_id not in rows_by_id:
+            return {"id": item_id, "kind": None, "result": "not found"}
+        loop = rows_by_id[item_id]
         kind = loop["subject"]
         try:
             if kind == "pr_awaiting_me":
@@ -203,9 +233,11 @@ async def run_selected(ids: list[int]) -> dict:
         except Exception as e:
             log.exception("loop run failed for item %s", item_id)
             res = f"failed: {str(e)[:150]}"
-        results.append({"id": item_id, "kind": kind, "result": res})
         db.audit("loop_run", {"kind": kind, "result": str(res)[:200]}, item_id=item_id)
         domain = {"pr_awaiting_me": "GitHub", "my_pr_stuck": "GitHub",
                   "email_unanswered": "Email", "silent_mention": "Teams"}.get(kind)
         vault.chieff_trace(domain, f"loop run [{kind}] {(loop['content'] or '')[:80]}: {res}")
-    return {"results": results}
+        return {"id": item_id, "kind": kind, "result": res}
+
+    results = await asyncio.gather(*[_run_one(i) for i in ids])
+    return {"results": list(results)}

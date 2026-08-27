@@ -19,7 +19,7 @@ autostart:
 		> ~/Library/LaunchAgents/io.arccos.cos.plist
 	launchctl unload ~/Library/LaunchAgents/io.arccos.cos.plist 2>/dev/null || true
 	launchctl load ~/Library/LaunchAgents/io.arccos.cos.plist
-	@echo "arc-CoS now starts on login. Board: http://localhost:7777"
+	@echo "Chief now starts on login. Board: http://localhost:7777"
 
 autostart-remove:
 	launchctl unload ~/Library/LaunchAgents/io.arccos.cos.plist 2>/dev/null || true

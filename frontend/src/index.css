@@ -101,34 +101,167 @@ body {
 .text-orange-300 { color: #fdba74; }
 .text-red-300, .text-red-400 { color: #fca5a5; }
 
-/* Light mode: the *-200/300/400 text shades are tuned for dark surfaces and
-   wash out on white. Override to darker, readable tones. Higher specificity
-   (html.light) wins over the base remaps above. */
+/* Light mode: the *-100/200/300/400 text shades are tuned for dark surfaces
+   and wash out on white or on the pale tinted cards used throughout the app.
+   Override every pastel shade actually used in the app to one darker,
+   readable tone per hue family. Higher specificity (html.light) wins over
+   the base remaps above. */
 html.light .text-green-200,
 html.light .text-green-300,
-html.light .text-emerald-300 { color: #15803d; }
+html.light .text-green-400,
+html.light .text-emerald-100,
+html.light .text-emerald-200,
+html.light .text-emerald-300,
+html.light .text-emerald-400,
+html.light .text-teal-400 { color: #15803d; }
+html.light .text-sky-100,
 html.light .text-sky-200,
+html.light .text-sky-300,
 html.light .text-sky-400 { color: #0369a1; }
-html.light .text-purple-200 { color: #6d28d9; }
-html.light .text-amber-200 { color: #92400e; }
+html.light .text-indigo-200,
+html.light .text-indigo-300 { color: #4338ca; }
+html.light .text-violet-100,
+html.light .text-violet-200,
+html.light .text-violet-300,
+html.light .text-violet-400,
+html.light .text-purple-200,
+html.light .text-purple-300,
+html.light .text-purple-400 { color: #6d28d9; }
+html.light .text-amber-100,
+html.light .text-amber-200,
+html.light .text-amber-300,
+html.light .text-amber-400,
+html.light .text-yellow-200 { color: #92400e; }
+html.light .text-orange-200,
 html.light .text-orange-300 { color: #c2410c; }
+html.light .text-red-200,
 html.light .text-red-300,
-html.light .text-red-400 { color: #b91c1c; }
+html.light .text-red-400,
+html.light .text-rose-300 { color: #b91c1c; }
 
-/* Slightly stronger chip tints in light so they read as filled chips */
-html.light .bg-green-900  { background-color: color-mix(in srgb, #22c55e 18%, white); }
-html.light .bg-green-800  { background-color: color-mix(in srgb, #22c55e 26%, white); }
-html.light .bg-sky-900    { background-color: color-mix(in srgb, #0ea5e9 18%, white); }
-html.light .bg-purple-900 { background-color: color-mix(in srgb, #8b5cf6 18%, white); }
-html.light .bg-amber-900  { background-color: color-mix(in srgb, #f59e0b 22%, white); }
-html.light .bg-orange-900 { background-color: color-mix(in srgb, #f97316 18%, white); }
-html.light .bg-indigo-900 { background-color: color-mix(in srgb, #6366f1 16%, white); }
+/* Slightly stronger chip tints in light so they read as filled chips.
+   Covers every solid (non-opacity) bg-{hue}-900/950 status-chip background
+   actually used in the app — without this, these render as literal
+   near-black/navy blocks in light mode since Tailwind's 900/950 shades are
+   raw dark colors with no theme awareness. */
+html.light .bg-green-900   { background-color: color-mix(in srgb, #22c55e 18%, white); }
+html.light .bg-green-800   { background-color: color-mix(in srgb, #22c55e 26%, white); }
+html.light .bg-green-950   { background-color: color-mix(in srgb, #22c55e 14%, white); }
+html.light .bg-emerald-900 { background-color: color-mix(in srgb, #10b981 18%, white); }
+html.light .bg-emerald-950 { background-color: color-mix(in srgb, #10b981 14%, white); }
+html.light .bg-sky-900     { background-color: color-mix(in srgb, #0ea5e9 18%, white); }
+html.light .bg-sky-950     { background-color: color-mix(in srgb, #0ea5e9 14%, white); }
+html.light .bg-cyan-950    { background-color: color-mix(in srgb, #06b6d4 14%, white); }
+html.light .bg-indigo-900  { background-color: color-mix(in srgb, #6366f1 16%, white); }
+html.light .bg-indigo-950  { background-color: color-mix(in srgb, #6366f1 14%, white); }
+html.light .bg-violet-900  { background-color: color-mix(in srgb, #8b5cf6 18%, white); }
+html.light .bg-violet-950  { background-color: color-mix(in srgb, #8b5cf6 14%, white); }
+html.light .bg-purple-900  { background-color: color-mix(in srgb, #a855f7 18%, white); }
+html.light .bg-amber-900   { background-color: color-mix(in srgb, #f59e0b 22%, white); }
+html.light .bg-amber-950   { background-color: color-mix(in srgb, #f59e0b 16%, white); }
+html.light .bg-yellow-900  { background-color: color-mix(in srgb, #eab308 22%, white); }
+html.light .bg-yellow-950  { background-color: color-mix(in srgb, #eab308 16%, white); }
+html.light .bg-orange-900  { background-color: color-mix(in srgb, #f97316 18%, white); }
+html.light .bg-orange-950  { background-color: color-mix(in srgb, #f97316 14%, white); }
+html.light .bg-red-900     { background-color: color-mix(in srgb, #ef4444 18%, white); }
+html.light .bg-red-950     { background-color: color-mix(in srgb, #ef4444 14%, white); }
+html.light .bg-rose-950    { background-color: color-mix(in srgb, #f43f5e 14%, white); }
 
-/* Opacity-variant utilities aren't covered by the base remaps */
-.bg-zinc-800\/50 { background-color: color-mix(in srgb, var(--surface-2) 60%, transparent); }
-html.light .bg-zinc-800\/50 { background-color: var(--surface-2); }
+/* Opacity-variant utilities aren't covered by the base remaps — Tailwind v4
+   compiles e.g. bg-zinc-800/40 as color-mix(..., var(--color-zinc-800) 40%, ...),
+   its OWN hardcoded dark-neutral variable, not our --surface-* tokens. Every
+   zinc-800/900 opacity variant actually used in the app (base and :hover) is
+   re-pointed at our tokens here so it re-themes instead of staying a muddy
+   dark-on-white patch in light mode. */
+.bg-zinc-800\/40,
+.bg-zinc-800\/50,
+.bg-zinc-800\/60,
+.bg-zinc-800\/70,
+.hover\:bg-zinc-800\/50:hover,
+.hover\:bg-zinc-800\/70:hover { background-color: color-mix(in srgb, var(--surface-2) 60%, transparent); }
+.bg-zinc-900\/30,
+.bg-zinc-900\/50,
+.bg-zinc-900\/70,
+.hover\:bg-zinc-900\/50:hover,
+.hover\:bg-zinc-900\/70:hover { background-color: color-mix(in srgb, var(--surface) 60%, transparent); }
+html.light .bg-zinc-800\/40,
+html.light .bg-zinc-800\/50,
+html.light .bg-zinc-800\/60,
+html.light .bg-zinc-800\/70,
+html.light .hover\:bg-zinc-800\/50:hover,
+html.light .hover\:bg-zinc-800\/70:hover,
+html.light .bg-zinc-900\/30,
+html.light .bg-zinc-900\/50,
+html.light .bg-zinc-900\/70,
+html.light .hover\:bg-zinc-900\/50:hover,
+html.light .hover\:bg-zinc-900\/70:hover { background-color: var(--surface-2); }
 .bg-green-950\/40 { background-color: color-mix(in srgb, #22c55e 12%, transparent); }
 .bg-red-950\/40 { background-color: color-mix(in srgb, #ef4444 12%, transparent); }
+/* Tinted-card opacity variants used by Pings (urgent rows), Today (current
+   meeting) and the Swarm worker cards — transparent color-mix works on both
+   themes; the dense /60+/80 chips need explicit light fills to stay readable. */
+.bg-red-950\/10 { background-color: color-mix(in srgb, #ef4444 5%, transparent); }
+.bg-red-950\/15 { background-color: color-mix(in srgb, #ef4444 6%, transparent); }
+.bg-red-950\/20 { background-color: color-mix(in srgb, #ef4444 8%, transparent); }
+.bg-emerald-950\/20 { background-color: color-mix(in srgb, #10b981 8%, transparent); }
+.bg-emerald-950\/50 { background-color: color-mix(in srgb, #10b981 14%, transparent); }
+.bg-sky-950\/20 { background-color: color-mix(in srgb, #0ea5e9 8%, transparent); }
+.bg-amber-950\/20 { background-color: color-mix(in srgb, #f59e0b 8%, transparent); }
+html.light .bg-red-950\/60 { background-color: color-mix(in srgb, #ef4444 16%, white); }
+html.light .bg-emerald-900\/80 { background-color: color-mix(in srgb, #10b981 22%, white); }
+html.light .bg-sky-950\/30 { background-color: color-mix(in srgb, #0ea5e9 12%, white); }
+/* Status-bar chips (drafts, pings bell, capture, vault) — their dark violet/
+   amber opacity fills read as muddy blocks on white. */
+html.light .bg-violet-900\/30,
+html.light .bg-violet-900\/40,
+html.light .bg-violet-900\/70,
+html.light .hover\:bg-violet-900\/50:hover,
+html.light .hover\:bg-violet-900\/60:hover { background-color: color-mix(in srgb, #8b5cf6 16%, white); }
+html.light .bg-amber-900\/40,
+html.light .bg-amber-900\/60,
+html.light .hover\:bg-amber-800\/60:hover { background-color: color-mix(in srgb, #f59e0b 20%, white); }
+
+/* ---- Swarm board: game pieces ---- */
+/* thinking indicator: three bouncing dots */
+@keyframes dot-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+  40% { transform: translateY(-3px); opacity: 1; }
+}
+.tdots span {
+  display: inline-block; width: 3px; height: 3px; margin: 0 1px;
+  border-radius: 9999px; background: currentColor;
+  animation: dot-bounce 1.2s infinite;
+}
+.tdots span:nth-child(2) { animation-delay: 0.15s; }
+.tdots span:nth-child(3) { animation-delay: 0.3s; }
+/* a piece landing in a lane */
+@keyframes card-pop {
+  0% { transform: scale(0.92) translateY(4px); opacity: 0; }
+  100% { transform: scale(1) translateY(0); opacity: 1; }
+}
+.card-pop { animation: card-pop 0.25s ease-out both; }
+/* active piece glow */
+@keyframes piece-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0); }
+  50% { box-shadow: 0 0 12px 0 rgba(56, 189, 248, 0.25); }
+}
+.piece-glow { animation: piece-glow 2.2s ease-in-out infinite; }
+/* strategy-map units glide between zones */
+.unit-move {
+  transition: left 0.9s cubic-bezier(0.22, 1, 0.36, 1),
+              top 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes unit-ring {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.35), 0 0 14px 2px rgba(56, 189, 248, 0.2); }
+  50% { box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.15), 0 0 22px 4px rgba(56, 189, 248, 0.3); }
+}
+.unit-active { animation: unit-ring 1.8s ease-in-out infinite; }
+@keyframes flag-plant {
+  0% { transform: scale(0.6) rotate(-8deg); }
+  60% { transform: scale(1.15) rotate(3deg); }
+  100% { transform: scale(1) rotate(0); }
+}
+.flag-plant { animation: flag-plant 0.45s ease-out both; }
 
 /* ---- Scrollbar ---- */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -176,6 +309,44 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .lift { transition: transform 0.14s ease, box-shadow 0.14s ease; }
 .lift:hover { transform: translateY(-1px); box-shadow: var(--shadow-sm); }
 .press:active { transform: scale(0.97); }
+
+/* ---- Skeleton shimmer (loading states) ---- */
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+.skeleton {
+  background: linear-gradient(
+    100deg,
+    var(--surface-2) 40%,
+    var(--surface-3) 50%,
+    var(--surface-2) 60%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+/* ---- Toast + command palette entrances ---- */
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.toast-in { animation: toastIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+@keyframes paletteIn {
+  from { opacity: 0; transform: translateY(-8px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.palette-in { animation: paletteIn 0.18s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* Respect users who prefer less motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 
 /* Weekly status summary preview: render raw Teams HTML legibly inside the dark panel. */
 .weekly-preview { line-height: 1.5; }

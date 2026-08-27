@@ -47,13 +47,16 @@ schedules:
   open_loops_minutes: 15
   transcripts_sweep_minutes: 15
   morning_brief: "08:00"
+  # Safety net: if today's daily note still doesn't exist by this time (e.g. the
+  # morning brief never ran because the machine was off), create a plain note
+  # from the template + carry-forward. Also runs once on app startup. Weekdays only.
+  ensure_daily_note: "09:30"
   evening_shutdown: "18:00"
 
 agents:
   chief:
     # Cost-optimal default for the high-volume triage/classification calls.
-    # Accessible Claude models: claude-haiku-4-5-20251001, claude-sonnet-4-6,
-    # claude-opus-4-8. PR review and weekly/roadmap synthesis use Sonnet.
+    # PR review and weekly/roadmap synthesis use Sonnet.
     model: claude-haiku-4-5-20251001
 
 # WRITE allowlist for Teams. Reading happens everywhere; the agent may only
@@ -111,9 +114,75 @@ chieff:
     max_lines: 10
     recipients: []            # 1:1 end-of-day status to these people, e.g. ["Your Manager"]
 
+# ---- The companion ---------------------------------------------------------
+# Your 1:1 command chat with CoS (Teams "Notes to self" — phone-friendly). CoS
+# consults with a live board snapshot and EXECUTES directions: swarms, retries,
+# watchers, coder sessions, sync, emergency kill switch. Replies post despite
+# global dry run (live: true) — the chat is you-only, not outward-facing.
+companion:
+  enabled: true
+  chat_id: "48:notes"
+  # Adaptive poll loop (not the scheduler): fast while chatting, backs off when
+  # idle. Tight hot cadence + a rapid re-poll burst right after each message.
+  hot_seconds: 0.7
+  warm_seconds: 8
+  idle_seconds: 45
+  hot_window_ticks: 90
+  warm_window_ticks: 40
+  # Fallback model before you pick one in the CoS panel; the live selection
+  # lives in DB settings (companion_provider / companion_model).
+  model: "claude-sonnet-4-6"
+  # Provider/model catalog for the picker in the CoS panel. Both providers are
+  # authenticated agent CLIs (`claude` / `codex`); add only model ids you have
+  # verified work on your account — a picker entry that 404s on send is worse
+  # than a missing one.
+  providers:
+    - id: anthropic
+      label: "Anthropic (Claude)"
+      cli: claude
+      warm: true          # persistent session, only first turn pays spawn
+      default: "claude-sonnet-4-6"
+      models:
+        - "claude-sonnet-4-6"
+        - "claude-haiku-4-5-20251001"
+    - id: codex
+      label: "OpenAI (Codex CLI)"
+      cli: codex
+      warm: false         # spawns per turn, so noticeably slower in chat
+      default: "gpt-5.4"
+      models:
+        - "gpt-5.4"
+  live: true
+  # Proactive side: CoS initiates heads-ups on material changes + a morning
+  # brief. Deduped by an audit cursor so it never double-pings.
+  proactive: true
+  proactive_minutes: 5
+  brief_hour: 9
+
+# ---- Desktop agent ---------------------------------------------------------
+# The companion's hands on this machine (runs IN-PROCESS with the backend — no
+# inbound ports, nothing public). Everything is bounded to these roots;
+# sensitive paths are blocked; high-risk commands need an explicit
+# "confirm <token>" reply; every operation is audited.
+desktop:
+  roots:
+    - "~/projects"
+  projects:
+    my-project:
+      path: "~/projects/my-project"
+      test: "cd backend && uv run pytest -q"
+      start: "cd backend && uv run uvicorn app.main:app --port 7777"
+    # another-project:
+    #   path: "~/projects/another-project"
+    #   ado_project: "Your ADO Project"
+    #   repo: "your-github-org/another-project"
+
 pr_review:
   # Watch this Teams group chat for GitHub PR links; review each new PR, post
   # critical findings as a GitHub comment, then post a summary back in the chat.
+  # While paused, NO reviews, chat posts, GitHub comments, or digests are
+  # produced (the board/API setting 'pr_review_paused' overrides this if set).
+  paused: false
   chat_topic: "PR review"
   sweep_minutes: 5
   max_diff_chars: 60000
@@ -126,13 +195,45 @@ pr_review:
   #     channel_id: "19:...@thread.tacv2"
   attribution: ""             # no disclaimer on PR posts; the emoji is the marker
 
+pr_channel_review:
+  # Auto first-pass review + ongoing thread conversation for colleagues' PRs
+  # posted for review in a Teams CHANNEL. Fires for any explicit review request
+  # from a colleague, never your own PRs. Narrower and more conservative than
+  # the pr_review chat automation above.
+  paused: true
+  team_id: "00000000-0000-0000-0000-000000000000"
+  channel_id: "19:xxxxxxxx@thread.tacv2"
+  # Short cadence: an early 👀 reaction is how the channel sees CoS has the
+  # ball; reviews themselves still take minutes, this is about acking fast.
+  sweep_minutes: 2
+  max_diff_chars: 60000
+  review_timeout_seconds: 300
+  model: "claude-sonnet-4-6"
+  # Sole scoping gate for untagged messages — a hard per-PR-URL check on the
+  # repo itself, independent of who posted it. Empty list = no restriction.
+  # An explicit @mention of you bypasses this entirely, any repo.
+  repos:
+    - "your-main-repo"
+
 transcripts:
   auto_summarize: true        # summarize ended meetings into the daily note
-  ask_in_chat: true           # if no transcript access, ask once in the meeting chat
+  # When the transcript cannot be pulled, ask once in that meeting's chat for
+  # the recording/transcript link.
+  ask_in_chat: false
 
 open_loops:
   email_unanswered_days: 2
   checkbox_carry_days: 3
+
+hygiene:
+  # Tier A pings auto-dismissed after this many hours (trivial; no reply needed).
+  tier_a_dismiss_hours: 6
+  # Stale pending drafts superseded after this many days.
+  stale_draft_days: 3
+  # Any classified item (including tier C) auto-dismissed after this many days.
+  stale_item_days: 10
+  # Audit log retention before pruning (keep the last N days).
+  audit_retention_days: 90
 
 confluence_feed:
   # Activity feed of pages you follow/author. The REST token is anonymous-scoped,
@@ -150,9 +251,12 @@ pr_readiness:
   # CoS checks YOUR own open PRs against your standards and nudges you privately
   # in your Teams self-chat before you flip a PR to Ready. Never posts on the PR.
   sweep_minutes: 20
-  repo_prefixes: ["arc-"]     # only your PRs in repos with these name prefixes
+  repo_prefixes: []           # only your PRs in repos with these name prefixes
   nudge: true                 # send the self-chat nudge (board shows regardless)
   renudge_hours: 20
+  # Where the nudge is sent. If your account has no Teams notes-to-self chat,
+  # pin the exact chat id here (message yourself in Teams once to create it).
+  # nudge_chat_id: "19:...@unq.gbl.spaces"
   # changed paths that count as "new behavior" requiring a test in the same PR
   test_required_globs:
     - "src/api/"
@@ -173,10 +277,24 @@ weekly_status:
   base_branch: "main"
   partner_github_logins: []            # logins counted as a partner/vendor (optional)
   partner_label: "partner"
+  home_label: "internal"               # label for non-partner PRs in the report
   chat_topic: "Tech Lead chat"         # Teams chat that receives the summary on approval
   mention: "Recipient Name"            # person tagged at the top of that message
   attribution: "Auto-compiled by CoS from PRs, ADO items and notes. Reviewed before posting."
   timeout_seconds: 300
+
+scrum:
+  # Daily "what I did" ticket for your own standup. The window is a rolling
+  # "yesterday {time}:30 -> today {time}:30" (Friday -> Monday through the
+  # weekend), so same-day work up to generation time is included. Never posted
+  # anywhere automatically — it's a copyable/editable ticket on the Scrum tab.
+  time: "16:00"
+  repo: "your-main-repo"      # repo the standup ticket is mostly scoped to
+  github_login: "your-gh-login"
+  # ado_projects: null uses knowledge.ado_projects (same default as the rest
+  # of the app); set explicitly here to scope the standup ticket.
+  model: "claude-sonnet-4-6"
+  timeout_seconds: 180
 
 knowledge:
   # Centralized knowledge in the vault, kept in sync: when a watched Confluence
@@ -185,6 +303,162 @@ knowledge:
   confluence_spaces: ["SPACEKEY"]
   ado_projects: ["Your ADO Project"]
   dir: "CoS/Knowledge"
+  # Keyword -> label rules for bucketing pages into use cases (ordered, first
+  # match wins). Unset = everything lands in "Other".
+  use_case_rules:
+    intake: "Intake"
+    pipeline: "Pipeline"
+    platform: "Platform"
+
+osca:
+  # Live monitor for a deployed agent pipeline on GCP. Reads the pipeline's
+  # Firestore state + Cloud Logging (via gcloud ADC) to trace runs and flag
+  # failures — escalations, blocked nodes, dead-letters, stalled runs, failing
+  # health probes, unschedulable pods. Feeds the arch-map overlays and the
+  # pipeline notification center. Remove/ignore if you have no such pipeline.
+  sweep_minutes: 5          # how often to poll + persist a snapshot
+  cache_seconds: 45         # in-process cache so UI polling doesn't hammer Firestore
+  project: "your-gcp-project"
+  environments:             # every environment gets state + activity monitoring
+    - { name: uat, database: "your-firestore-db-uat" }
+    - { name: dev, database: "your-firestore-db-dev" }
+  # Substring match auto-covers new environments; log_namespaces is the
+  # fallback if this is removed.
+  log_namespace_match: "your-pipeline"
+  log_namespaces: ["your-pipeline-uat", "your-pipeline-dev"]
+  log_hours: 24
+  stall_hours: 24           # stream run with no event this long = stalled
+  dead_letter_fresh_days: 14
+
+graph_reauth:
+  # When the MS Graph token dies, the auth helper still needs a real interactive
+  # Microsoft sign-in (you click through it yourself — this never gets
+  # automated). What CoS automates is everything before that click: detect the
+  # dead token, find a free localhost port for the OAuth redirect, and launch
+  # the helper via the desktop agent's open_terminal.
+  enabled: true
+  check_minutes: 10         # how often to check job_runs for an auth failure
+  cooldown_minutes: 60      # don't re-launch more often than this per attempt
+  # A launched sign-in holds a lock so we never open two login pages at once;
+  # past this age it counts as abandoned: stop it and allow a relaunch.
+  max_inflight_minutes: 30
+
+# ---- Agent swarm -----------------------------------------------------------
+# Read the ADO board -> one ephemeral read-only worker per (item, runbook) ->
+# live pass/fail on the board's Swarm tab -> durable receipts. The ADO evidence
+# comment and Teams summary only go out when dry run is off. Trigger from the
+# Swarm tab or POST /api/swarm/run; scheduled runs stay off until schedule_enabled.
+swarm:
+  enabled: true
+  schedule_enabled: false
+  schedule_time: "10:30"
+  # Pipeline heartbeat: between runs, ship committed work, watch CI, fix
+  # failures, sync PR merges/closures/comments back to the tickets, announce
+  # green PRs (near-zero cost when idle).
+  housekeeping_minutes: 5
+  # Post-merge stages: deploy check + smoke test. branch: the git branch your
+  # test environment deploys from (merge commit must land on it); leave empty
+  # to assume deployment delay_minutes after the merge. smoke: osca = judge the
+  # pipeline live monitor for NEW breakage after the deploy; none = skip.
+  uat:
+    enabled: false
+    branch: "uat"
+    delay_minutes: 30
+    smoke: none
+  # Simultaneous workers (each ticket runs 1-2 workers). Workers are cheap
+  # Haiku calls; the practical ceiling is the Anthropic rate limit.
+  max_concurrent: 8
+  max_items: 5           # auto-picked items per run (explicit selections are uncapped)
+  projects: ["Your ADO Project"]
+  # WIQL states that qualify an item (case-insensitive; empty list = any state)
+  states: ["New", "To Do", "Approved", "Active", "In Progress", "Committed",
+           "Doing", "Resolved", "In Review", "Code Review"]
+  worker_model: claude-haiku-4-5-20251001
+  reviewer_model: claude-sonnet-4-6
+  # Per-runbook worker timeout in seconds (default 300).
+  timeouts:
+    smoke-test: 120
+  # Self-healing: failed read workers retry once with a fresh context; failed
+  # coder attempts get one repair pass in the same worktree; orphaned runs and
+  # worktrees are reconciled at the start of every run.
+  retries: 1
+  # GitHub PRs join the scan: PRs awaiting your review + your own open PRs.
+  pr:
+    enabled: true
+    max_items: 4
+    # org: "your-github-org"   # optional override; falls back to github.owner
+  max_diff_chars: 50000   # pr-review runbook: how much diff a worker sees
+  # Pipeline autonomy: a scan that flags workable tickets flows straight into
+  # the ticket swarm (coding stage) without a button press.
+  auto_code: false
+  # Run profiles (board button / POST /api/swarm/run {profile}):
+  #   board     read-only hygiene over ADO items + PRs
+  #   ticket    investigate + code-plan, then coder worktrees for codeable tickets
+  #   pr_review diff review of PRs: critical issues only + tech debt
+  #   tech_debt coder worktrees fixing tech-debt findings from pr_review runs
+  profiles:
+    board:     { runbooks: [ticket-investigate, pr-status, smoke-test, pr-health] }
+    ado_scan:  { runbooks: [ticket-investigate, pr-status, smoke-test] }
+    ticket:    { runbooks: [ticket-investigate, ticket-code-plan] }
+    pr_scan:   { runbooks: [pr-health] }
+    pr_review: { runbooks: [pr-review] }
+    tech_debt: { runbooks: [] }
+  # Coder workers: write access ONLY inside throwaway git worktrees under
+  # repos_dir/.swarm-worktrees. Finished work waits at 'ready' for approval on
+  # the Worktrees tab; push + draft PR go through actions.py (kill switch +
+  # dry run). project_repos maps ADO projects to locally-cloned repos.
+  code:
+    repos_dir: "/absolute/path/to/your/repos"
+    base_branch: "main"
+    model: claude-sonnet-4-6
+    # Real feature work needs room: generous wall-clock + turn budget per coder
+    # (a too-small ceiling burns money twice and ships nothing).
+    timeout_seconds: 2400
+    max_turns: 150
+    max_worktrees: 2       # coder worktrees per run
+    repair_attempts: 1
+    # CI stage: shipped PRs are watched; failing checks get a fix coder in the
+    # branch's worktree, capped per PR.
+    ci_fix_attempts: 2
+    # Review pipeline: rounds of review-comment fixing per PR before the
+    # board flags it needs-human. Non-blocking comments bank as tech debt.
+    review_fix_attempts: 3
+    # A worktree nobody approves or discards is dumped to the bin after this
+    # long (dir + branch removed; the row stays as the receipt).
+    worktree_ttl_hours: 72
+    # Pipeline autonomy: a clean coder run pushes + opens a draft PR by itself
+    # (intervene via Stop/Discard; the kill switch blocks everything).
+    auto_pr: false
+    # Set true to let swarm DRAFT PRs ship even while global dry run is on.
+    pr_live: false
+    project_repos:
+      Your ADO Project: your-github-org/your-main-repo
+  receipts:
+    ado_comment: true    # evidence comment per item (dry run: audit-log only)
+    pr_comment: true     # evidence comment per reviewed PR (same gates)
+    # After a PR review, post the outcome in the PR chat (pr_review.chat_topic)
+    # tagging the PR owner so they can continue their work.
+    pr_chat: true
+    # Unclear acceptance criteria: the swarm posts its clarifying questions on
+    # the ticket ONCE (per 7 days) and waits; a human reply un-blocks the next run.
+    clarify_comment: true
+    # Anti-spam guardrail: identical receipts are skipped within the cooldown;
+    # when something DID change, a gate worker reads the ticket's existing
+    # comments and posts only the delta (never re-asks unanswered questions).
+    comment_cooldown_hours: 24
+    # Set true to let swarm ADO comments (evidence + clarifying questions) post
+    # for real even while global dry run is on. The kill switch still blocks everything.
+    ado_live: false
+    # Teams chat where shipped swarm PRs are announced.
+    # pr_chat_id: "19:...@thread.v2"
+    # Team chat for escalating unanswered ticket questions + smoke-pass updates.
+    # uat_chat_id: "19:...@thread.v2"
+    uat_chat_live: false
+    clarify_ping_hours: 24
+    # Teams chat for the run summary; id wins over topic. Point at a real chat
+    # (it must also be in teams_write.allow) to enable the post.
+    summary_chat_topic: ""
+    # summary_chat_id: "19:...@thread.v2"
 
 vault:
   # Path to your Obsidian vault (or any folder of markdown notes).

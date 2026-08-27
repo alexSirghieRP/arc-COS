@@ -1,6 +1,7 @@
 """Runtime state: cached presence, away-mode, proposed focus."""
 
 import asyncio
+import html
 import json
 import logging
 import time
@@ -13,13 +14,35 @@ log = logging.getLogger("chief.state")
 
 _presence_cache: dict = {}
 _presence_ts: float = 0.0
+_presence_lock: "asyncio.Lock | None" = None
 _focus_cache: list = []
 _focus_ts: float = 0.0
+_focus_lock: "asyncio.Lock | None" = None
 
 
-async def get_presence(ttl: int = 60) -> dict:
+def _get_presence_lock() -> "asyncio.Lock":
+    global _presence_lock
+    if _presence_lock is None:
+        import asyncio as _aio
+        _presence_lock = _aio.Lock()
+    return _presence_lock
+
+
+def _get_focus_lock() -> "asyncio.Lock":
+    global _focus_lock
+    if _focus_lock is None:
+        import asyncio as _aio
+        _focus_lock = _aio.Lock()
+    return _focus_lock
+
+
+async def get_presence(ttl: int = 120) -> dict:
     global _presence_cache, _presence_ts
-    if time.time() - _presence_ts > ttl:
+    if time.time() - _presence_ts <= ttl:
+        return _presence_cache  # fast path
+    async with _get_presence_lock():
+        if time.time() - _presence_ts <= ttl:
+            return _presence_cache
         try:
             _presence_cache = await graph.presence()
             _presence_ts = time.time()
@@ -83,43 +106,81 @@ async def _gh_prs(query_args: list[str]) -> list[dict]:
     return json.loads(out.decode())
 
 
+def _ellip(s: str | None, n: int) -> str:
+    """Word-boundary truncation with a real ellipsis (a hard slice cuts mid-word
+    and looks broken on the board). Also decodes HTML entities Teams leaves in
+    message bodies (&gt;, &amp;...) so titles read naturally."""
+    s = html.unescape((s or "").strip())
+    if len(s) <= n:
+        return s
+    return s[:n].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
+
 async def proposed_focus(ttl: int = 300) -> list[dict]:
-    """PRs awaiting me, my stuck PRs, aged pings, ADO sprint items."""
+    """PRs awaiting me, my stuck PRs, aged pings, urgent B/C pings, ADO sprint items.
+    Lock serializes concurrent cold-cache callers so gh subprocesses fire at most once."""
     global _focus_cache, _focus_ts
     if time.time() - _focus_ts < ttl and _focus_cache:
-        return _focus_cache
-    focus: list[dict] = []
+        return _focus_cache  # fast path: cache warm
 
-    for pr in await _gh_prs(["--review-requested=@me"]):
-        focus.append({"kind": "pr_review", "title": pr["title"],
-                      "ref": pr["url"], "detail": pr["repository"]["nameWithOwner"]})
-    for pr in await _gh_prs(["--author=@me"]):
-        focus.append({"kind": "my_pr", "title": pr["title"],
-                      "ref": pr["url"], "detail": pr["repository"]["nameWithOwner"]})
+    async with _get_focus_lock():
+        # Double-check: another coroutine may have refreshed while we waited.
+        if time.time() - _focus_ts < ttl and _focus_cache:
+            return _focus_cache
 
-    aged = db.query(
-        "SELECT * FROM items WHERE source='teams_chat' AND status IN ('new','classified') "
-        "AND received_at < ? ORDER BY received_at ASC LIMIT 5", (db.cutoff(hours=4),))
-    for it in aged:
-        focus.append({"kind": "aged_ping", "title": f"{it['sender']}: {(it['content'] or '')[:80]}",
-                      "ref": f"item:{it['id']}", "detail": it["subject"]})
+        focus: list[dict] = []
 
-    try:
-        from .mcp_clients import get_manager
-        ado = await get_manager().call("azure-devops", "wit_my_work_items", {
-            "project": "OS Conversions Agent", "type": "assignedtome", "top": 5})
-        work_items = ado.get("workItems", ado) if isinstance(ado, dict) else ado
-        if isinstance(work_items, list):
-            for wi in work_items[:5]:
-                fields = wi.get("fields", {}) if isinstance(wi, dict) else {}
-                title = fields.get("System.Title") or wi.get("title") or f"work item {wi.get('id')}"
-                state = fields.get("System.State") or ""
-                if state in ("Closed", "Done", "Removed"):
+        # Urgent pings first (tier C, or urgent flag, no reply yet)
+        urgent_pings = db.query(
+            "SELECT * FROM items WHERE source IN ('teams_chat','teams_channel') "
+            "AND tier IN ('B','C') AND urgent=1 "
+            "AND status IN ('new','classified','drafted') "
+            "AND (snoozed_until IS NULL OR snoozed_until <= ?) LIMIT 5", (db.now(),))
+        for it in urgent_pings:
+            focus.insert(0, {
+                "kind": "urgent_ping",
+                "title": f"{it['sender']}: {_ellip(it['content'], 120)}",
+                "ref": f"item:{it['id']}", "detail": it["subject"],
+            })
+
+        async def _ado_items():
+            # The azure-devops MCP server's wit_my_work_items tool errors out
+            # reliably in practice; ado.py's REST client (built for the My-items
+            # tab) hits the same PAT-authenticated API directly and works.
+            try:
+                from .ado import my_items
+                result = await asyncio.to_thread(my_items)
+                return result.get("items") if isinstance(result, dict) else None
+            except Exception as e:
+                log.warning("ado focus failed: %s", e)
+                return None
+
+        prs_me, prs_author, ado_raw = await asyncio.gather(
+            _gh_prs(["--review-requested=@me"]),
+            _gh_prs(["--author=@me"]),
+            _ado_items(),
+        )
+        for pr in prs_me:
+            focus.append({"kind": "pr_review", "title": pr["title"],
+                          "ref": pr["url"], "detail": pr["repository"]["nameWithOwner"]})
+        for pr in prs_author:
+            focus.append({"kind": "my_pr", "title": pr["title"],
+                          "ref": pr["url"], "detail": pr["repository"]["nameWithOwner"]})
+
+        aged = db.query(
+            "SELECT * FROM items WHERE source='teams_chat' AND tier IN ('B','C') "
+            "AND status IN ('new','classified') AND urgent=0 "
+            "AND received_at < ? ORDER BY received_at ASC LIMIT 5", (db.cutoff(hours=4),))
+        for it in aged:
+            focus.append({"kind": "aged_ping", "title": f"{it['sender']}: {_ellip(it['content'], 120)}",
+                          "ref": f"item:{it['id']}", "detail": it["subject"]})
+
+        if ado_raw:
+            for wi in ado_raw[:5]:
+                if wi.get("bucket") in ("Done", "Removed"):
                     continue
-                focus.append({"kind": "ado", "title": title, "ref": str(wi.get("id")),
-                              "detail": state})
-    except Exception as e:
-        log.warning("ado focus failed: %s", e)
+                focus.append({"kind": "ado", "title": wi.get("title") or f"work item {wi.get('id')}",
+                              "ref": str(wi.get("id")), "detail": wi.get("state")})
 
-    _focus_cache, _focus_ts = focus, time.time()
-    return focus
+        _focus_cache, _focus_ts = focus, time.time()
+    return _focus_cache
