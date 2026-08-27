@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import {
   Inbox, Tags, Send, Clock, FileEdit, GitPullRequest, BookOpen, BarChart3,
   ClipboardList, Settings2, AlertTriangle, CheckCircle2, Mail, Activity, Cpu,
@@ -23,7 +23,7 @@ const CATS = {
 }
 
 // ---- MCP route / source each action came from -----------------------------
-// Brand colors: Teams purple, Confluence light blue, Outlook darker
+// Brand colors per the owner: Teams purple, Confluence light blue, Outlook darker
 // blue, Obsidian darker purple, GitHub black/white. Logos from react-icons.
 const ROUTES = {
   teams:      { label: 'Teams',      Logo: PiMicrosoftTeamsLogoFill,   text: 'text-[#7B83EB]' },
@@ -38,6 +38,7 @@ const ROUTES = {
 function route(a, d) {
   const act = a.action, ch = d.channel, s = d.source
   if (act.startsWith('pr_review') || act === 'github_comment' || act === 'pr_digest_posted') return 'github'
+  if (act === 'post_meeting_posted') return 'teams'
   if (act === 'weekly_status_post') return 'teams'
   if (act.startsWith('weekly_status')) return 'confluence'
   if (act === 'knowledge_synced' || act === 'knowledge_error')
@@ -77,6 +78,7 @@ const MAP = {
   pr_review_post:   (d) => ['send', `Posted PR review summary to chat`, d.body],
   github_comment:   (d) => ['send', `Commented on PR ${pr(d)}`, d.body],
   pr_digest_posted: () => ['knowledge', `Posted GitHub pending-work digest`, null],
+  post_meeting_posted: () => ['knowledge', `Posted post-meeting catch-up digest`, null],
   knowledge_synced: (d) => ['knowledge', `Synced knowledge`, `${d.confluence?.length || 0} Confluence · ${d.ado?.length || 0} ADO`],
   weekly_status_drafted:   (d) => ['weekly', `Weekly status drafted — awaiting approval`, `${d.metrics?.prs ?? '?'} PRs · ${d.title || ''}`],
   weekly_status_published: () => ['weekly', `Published weekly status + posted summary`, null],
@@ -87,6 +89,8 @@ const MAP = {
   setting_changed:  (d) => ['system', `Set ${d.key} = ${d.value}`, null],
   checkbox_toggled: () => ['system', `Toggled a task in the daily note`, null],
   write_access_changed: (d) => ['system', `${d.allow ? 'Enabled' : 'Disabled'} writing in ${d.chat}`, null],
+  item_status_changed: (d) => ['system', `Marked item ${d.to === 'new' ? 'reopened' : d.to}`, `was: ${d.from}`],
+  connector_reconnect: (d) => ['system', `Restarted MCP server ${d.server} (${d.status})`, null],
 }
 
 function trim(s, n) { s = String(s ?? ''); return s.length > n ? s.slice(0, n) + '…' : s }
@@ -99,8 +103,7 @@ function parse(a) {
   try { return typeof a.detail === 'string' ? JSON.parse(a.detail) : a.detail || {} } catch { return {} }
 }
 
-function describe(a) {
-  const d = parse(a)
+function describe(a, d = parse(a)) {
   if (isErr(a.action)) return { cat: 'error', primary: a.action.replace(/_/g, ' '), secondary: d.error || d.reason || a.detail }
   const f = MAP[a.action]
   if (f) { const [cat, primary, secondary] = f(d); return { cat, primary, secondary } }
@@ -147,41 +150,83 @@ function Block({ label, tone, body, mono }) {
   )
 }
 
-export default function ActivityPanel() {
+export default function ActivityPanel({ refreshTick }) {
   const [audit, setAudit] = useState([])
   const [hideErrors, setHideErrors] = useState(false)
   const [openId, setOpenId] = useState(null)
   const [routeFilter, setRouteFilter] = useState(null)
+  const lastIdRef = React.useRef(0)
 
   useEffect(() => {
-    const load = () =>
-      fetch('/api/audit?limit=150').then((r) => r.json()).then((d) => setAudit(Array.isArray(d) ? d : [])).catch(() => {})
-    load()
-    const t = setInterval(load, 5000)
-    return () => clearInterval(t)
-  }, [])
+    // Full fetch on mount; incremental on subsequent ticks.
+    const incremental = lastIdRef.current > 0
+    const url = incremental
+      ? `/api/audit?limit=200&after_id=${lastIdRef.current}`
+      : '/api/audit?limit=150'
+    fetch(url)
+      .then((r) => r.json())
+      .then((d) => {
+        const rows = d.log ?? (Array.isArray(d) ? d : [])
+        if (d.last_id) lastIdRef.current = d.last_id
+        if (incremental) {
+          // Overlapping fetches (two refreshTicks racing before lastIdRef
+          // advances) can return the same rows twice — dedupe by id.
+          setAudit((prev) => {
+            const seen = new Set(prev.map((r) => r.id))
+            const fresh = rows.filter((r) => !seen.has(r.id))
+            return [...fresh, ...prev].slice(0, 300)
+          })
+        } else {
+          setAudit(rows)
+        }
+      })
+      .catch(() => {})
+  }, [refreshTick])
+
+  // Parse each row's JSON detail blob once per audit fetch, not on every
+  // render — expanding a row or flipping a filter used to re-run JSON.parse
+  // and re-derive the route for up to 300 rows on every keystroke/click.
+  const enriched = useMemo(
+    () => audit.map((a) => {
+      const d = parse(a)
+      return { a, d, route: route(a, d), err: isErr(a.action) }
+    }),
+    [audit],
+  )
 
   // routes present in the current data, in a stable display order
   const order = ['teams', 'confluence', 'outlook', 'obsidian', 'github', 'ado', 'local']
-  const present = order.filter((k) => audit.some((a) => route(a, parse(a)) === k))
+  const present = useMemo(
+    () => order.filter((k) => enriched.some((e) => e.route === k)),
+    [enriched],
+  )
+  const errorCount = useMemo(() => enriched.filter((e) => e.err).length, [enriched])
 
-  let rows = hideErrors ? audit.filter((a) => !isErr(a.action)) : audit
-  if (routeFilter) rows = rows.filter((a) => route(a, parse(a)) === routeFilter)
-  const errorCount = audit.filter((a) => isErr(a.action)).length
+  const rows = useMemo(() => {
+    let r = hideErrors ? enriched.filter((e) => !e.err) : enriched
+    if (routeFilter) r = r.filter((e) => e.route === routeFilter)
+    return r
+  }, [enriched, hideErrors, routeFilter])
 
   // think -> act chain: every audit event sharing an item_id, oldest first
-  const byItem = {}
-  audit.forEach((a) => { if (a.item_id != null) (byItem[a.item_id] ||= []).push(a) })
-  Object.values(byItem).forEach((arr) => arr.sort((x, y) => x.id - y.id))
+  const byItem = useMemo(() => {
+    const map = {}
+    audit.forEach((a) => { if (a.item_id != null) (map[a.item_id] ||= []).push(a) })
+    Object.values(map).forEach((arr) => arr.sort((x, y) => x.id - y.id))
+    return map
+  }, [audit])
 
   // group consecutive rows by minute for a top-down, time-clustered read
-  const groups = []
-  rows.forEach((a) => {
-    const key = clock(a.ts)
-    const last = groups[groups.length - 1]
-    if (last && last.key === key) last.items.push(a)
-    else groups.push({ key, items: [a] })
-  })
+  const groups = useMemo(() => {
+    const g = []
+    rows.forEach((e) => {
+      const key = clock(e.a.ts)
+      const last = g[g.length - 1]
+      if (last && last.key === key) last.items.push(e)
+      else g.push({ key, items: [e] })
+    })
+    return g
+  }, [rows])
 
   return (
     <Panel
@@ -190,8 +235,8 @@ export default function ActivityPanel() {
       actions={
         <button
           onClick={() => setHideErrors((v) => !v)}
-          className={`press flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] ring-1 ${
-            hideErrors ? 'bg-zinc-800 text-zinc-300 ring-zinc-700' : 'bg-red-950 text-red-300 ring-red-900'
+          className={`press flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] ring-1 transition-colors ${
+            hideErrors ? 'bg-zinc-800 text-zinc-300 ring-zinc-700 hover:bg-zinc-700' : 'bg-red-950 text-red-300 ring-red-900 hover:bg-red-900/60'
           }`}
         >
           <AlertTriangle size={12} />
@@ -221,13 +266,12 @@ export default function ActivityPanel() {
               <span className="h-px flex-1 bg-zinc-800/70" />
             </div>
             <div className="space-y-1">
-              {g.items.map((a) => {
-                const { cat, primary, secondary } = describe(a)
+              {g.items.map(({ a, d, route: rt }) => {
+                const { cat, primary, secondary } = describe(a, d)
                 const C = CATS[cat] || CATS.system
                 const Icon = C.icon
                 const err = cat === 'error'
-                const d = parse(a)
-                const RT = ROUTES[route(a, d)] || ROUTES.local
+                const RT = ROUTES[rt] || ROUTES.local
                 const isOpen = openId === a.id
                 const chain = a.item_id != null ? byItem[a.item_id] || [] : []
                 const think = reasoning(a, d)

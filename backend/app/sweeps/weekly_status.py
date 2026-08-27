@@ -1,7 +1,7 @@
 """Weekly status report.
 
 Every Friday Chief gathers the week's evidence (merged PRs to dev in
-arc-implementation-agents, ADO work items referenced, the daily notes and the
+the configured repo, ADO work items referenced, the daily notes and the
 knowledge Chief synced), reads the previous week's Confluence page for format
 and carry-forward, and synthesizes a status report in the same shape as the
 existing pages under the parent. The result is created as an UNPUBLISHED
@@ -135,26 +135,26 @@ async def _gather_prs(meta: dict, cfg: dict) -> dict:
         "--json", "number,title,url,author,mergedAt,body")
     if rc != 0:
         log.warning("gh pr list failed: %s", out[:200])
-        return {"prs": [], "total": 0, "realpage": 0, "partner": 0, "ado_refs": []}
+        return {"prs": [], "total": 0, "home": 0, "partner": 0, "ado_refs": []}
     prs = json.loads(out)
     partner_logins = {l.lower() for l in cfg.get("partner_github_logins", [])}
     partner_label = cfg.get("partner_label", "partner")
     home_label = cfg.get("home_label", "Internal")
     ado_refs: set[str] = set()
-    realpage = partner = 0
+    home = partner = 0
     brief = []
     for p in prs:
         login = ((p.get("author") or {}).get("login") or "").lower()
         is_partner = login in partner_logins
         partner += is_partner
-        realpage += not is_partner
+        home += not is_partner
         ado_refs |= {m.group(1) for m in AB_RE.finditer(
             (p.get("title", "") + "\n" + (p.get("body") or "")))}
         brief.append(f"#{p['number']} [{partner_label if is_partner else home_label}] "
                      f"{p['title']}")
-    return {"prs": prs, "total": len(prs), "realpage": realpage, "partner": partner,
-            "partner_label": partner_label, "home_label": home_label, "ado_refs": sorted(ado_refs, key=int),
-            "brief": brief}
+    return {"prs": prs, "total": len(prs), "home": home, "partner": partner,
+            "partner_label": partner_label, "home_label": home_label,
+            "ado_refs": sorted(ado_refs, key=int), "brief": brief}
 
 
 def _gather_context(meta: dict) -> str:
@@ -235,7 +235,7 @@ def _watch_html(items: list[dict]) -> str:
 def _numbers_html(prs: dict, extra: list[str]) -> str:
     out = ["<ul>"]
     out.append(f"<li><strong>{prs['total']} PRs</strong> merged to <code>dev</code> &mdash; "
-               f"{prs['realpage']} &rarr; {_esc(prs.get('home_label','Internal'))} &middot; {prs['partner']} &rarr; "
+               f"{prs['home']} &rarr; {_esc(prs.get('home_label', 'Internal'))} &middot; {prs['partner']} &rarr; "
                f"{_esc(prs['partner_label'])}.</li>")
     if prs["ado_refs"]:
         out.append(f"<li><strong>{len(prs['ado_refs'])} ADO work items</strong> referenced.</li>")
@@ -311,9 +311,12 @@ async def generate(target: date | None = None) -> dict:
     meta = _week_meta(today)
     leads = cfg.get("leads") or policy().get("me", {}).get("name", "")
 
-    prs = await _gather_prs(meta, cfg)
-    prior_md, prior_title = await asyncio.to_thread(_prior_page, cfg)
-    context = await asyncio.to_thread(_gather_context, meta)
+    # All three data-gather steps are independent; run concurrently.
+    prs, (prior_md, prior_title), context = await asyncio.gather(
+        _gather_prs(meta, cfg),
+        asyncio.to_thread(_prior_page, cfg),
+        asyncio.to_thread(_gather_context, meta),
+    )
 
     ado_txt = (", ".join(f"AB#{r}" for r in prs["ado_refs"])
                if prs["ado_refs"] else "(none referenced in PR titles/bodies)")
@@ -346,7 +349,7 @@ async def generate(target: date | None = None) -> dict:
         log.warning("Confluence draft create failed (saving report anyway): %s", conf_error)
     teams_html = render_teams(meta, prs, result, leads, conf_url=page["page_url"],
                               mention=cfg.get("mention"))
-    metrics = {"prs": prs["total"], "realpage": prs["realpage"],
+    metrics = {"prs": prs["total"], "home": prs["home"],
                "partner": prs["partner"], "partner_label": prs["partner_label"],
                "ado_refs": prs["ado_refs"]}
     ts = db.now()

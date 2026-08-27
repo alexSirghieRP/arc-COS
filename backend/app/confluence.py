@@ -2,7 +2,7 @@
 
 Uses the Atlassian token already configured for the confluence MCP server (in
 the user-level Claude settings) via the REST API. Two CQL queries -- pages
-the user created/contributed to ("mine") and pages he watches ("following") --
+the user created/contributed to ("mine") and pages they watch ("following") --
 merged and tagged, newest first.
 """
 
@@ -11,11 +11,24 @@ import logging
 
 import httpx
 
-from . import certs
+from . import certs, db
+from .actions import SendBlocked
 from .config import mcp_server_defs, policy
 
 log = logging.getLogger("chief.confluence")
 _HTTP = httpx.Client(verify=certs.ca_bundle(), timeout=60)
+
+
+def _check_write_gates(action: str, detail: dict) -> bool:
+    """Same guardrails as every other outbound send in actions.py: kill switch
+    blocks instantly, dry run logs and surfaces instead of writing. Returns True
+    if the caller should proceed with the real write."""
+    if db.get_setting("kill_switch") == "true":
+        raise SendBlocked("kill switch is on")
+    if db.get_setting("dry_run") == "true":
+        db.audit(action, {**detail, "dry_run": True})
+        return False
+    return True
 
 
 def _conf() -> dict:
@@ -77,8 +90,7 @@ def my_updates() -> dict:
                 "title": p.get("title", ""),
                 "space": (p.get("space") or {}).get("name")
                          or (p.get("space") or {}).get("key", ""),
-                "url": base + "/wiki" + (p.get("_links", {}).get("webui", "")
-                                         if p.get("_links") else f"/spaces/pages/{pid}"),
+                "url": web_url(base, p),
                 "version": ver.get("number"),
                 "by": (ver.get("by") or {}).get("displayName", "?"),
                 "when": (ver.get("when") or "")[:19].replace("T", " "),
@@ -127,7 +139,13 @@ def child_pages(parent_id: str, limit: int = 25) -> list[dict]:
 def create_page(space_key: str, parent_id: str, title: str, storage_html: str,
                 draft: bool = True) -> dict:
     """Create a page under parent_id. draft=True leaves it unpublished (not in
-    the tree) until publish_page() is called. Returns {id, title, status, url, edit_url}."""
+    the tree) until publish_page() is called. Returns {id, title, status, url, edit_url}.
+    Honors the kill switch (raises SendBlocked) and dry run (returns a dry_run
+    stub without writing) — same guardrails as any other outbound send."""
+    if not _check_write_gates("confluence_create_page",
+                               {"space": space_key, "title": title, "draft": draft}):
+        return {"id": None, "title": title, "status": "dry_run", "url": None,
+                "page_url": None, "edit_url": None}
     base, auth = _base_auth()
     payload = {
         "type": "page",
@@ -151,7 +169,10 @@ def create_page(space_key: str, parent_id: str, title: str, storage_html: str,
 
 def publish_page(page_id: str) -> dict:
     """Publish a draft page (status draft -> current) at the next version.
-    Returns {id, title, status, url}."""
+    Returns {id, title, status, url}. Honors the kill switch (raises SendBlocked)
+    and dry run (returns a dry_run stub without writing)."""
+    if not _check_write_gates("confluence_publish_page", {"page_id": page_id}):
+        return {"id": page_id, "title": None, "status": "dry_run", "url": None}
     base, auth = _base_auth()
     cur = get_page(page_id, expand="version,space,body.storage")
     ver = (cur.get("version") or {}).get("number", 1)

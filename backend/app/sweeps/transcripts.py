@@ -6,6 +6,7 @@ Until the user re-consents (cd ~/RP/mcp-ms-graph && node auth-node.js), transcri
 fetches fail contained and the chat fallback covers everything.
 """
 
+import hashlib
 import logging
 import re
 from datetime import date, datetime, timedelta
@@ -117,12 +118,61 @@ async def _ask_for_transcript(chat_id: str, subject: str, ext_id: str, item_id: 
                  item_id=item_id)
 
 
+_ACTION_VERBS = re.compile(
+    r'\b(will|to|should|needs?|must|shall|follow[- ]?up|review|check|send|share|'
+    r'schedule|confirm|update|prepare|draft|write|look into|reach out|respond|reply)\b',
+    re.I)
+_ME_FIRST = ((policy().get("me", {}).get("name") or "").split() or [""])[0]
+_ME_RE = re.compile(rf'\b{re.escape(_ME_FIRST)}\b', re.I) if _ME_FIRST else None
+
+
+def _extract_owner_actions(summary: str, subject: str) -> list[str]:
+    """Pull lines from a meeting summary that assign an action to the user
+    (matched by first name from policy me.name).
+    Returns verb-first action strings, deduped, max 5."""
+    actions = []
+    for raw in summary.splitlines():
+        line = raw.strip().lstrip("- •*").strip()
+        if len(line) < 15:
+            continue
+        if _ME_RE and _ME_RE.search(line) and _ACTION_VERBS.search(line):
+            actions.append(line)
+    return actions[:5]
+
+
+def _upsert_action_loop(action: str, meeting_subject: str,
+                        meeting_date: date, item_id: int) -> bool:
+    """Create an open_loop for one meeting action item. Returns True if new."""
+    key = hashlib.sha1(f"{meeting_date}:{action}".encode()).hexdigest()[:12]
+    ext_id = f"meeting_action:{meeting_date.isoformat()}:{key}"
+    _, is_new = db.upsert_item(
+        source="open_loop", type_="open_loop", external_id=ext_id,
+        subject=action[:200],
+        content=f"Action from meeting '{meeting_subject}' on {meeting_date.isoformat()}",
+        received_at=meeting_date.isoformat())
+    if is_new:
+        db.audit("loop_opened", {"loop": action[:200], "source": "meeting_summary",
+                                 "meeting": meeting_subject}, item_id=item_id)
+    return is_new
+
+
 async def sweep() -> dict:
     if not policy().get("transcripts", {}).get("auto_summarize", True):
         return {"skipped": "disabled in policy.yaml"}
 
+    import asyncio
+
     now = datetime.now().astimezone()
-    chats = await graph.list_chats(top=50)
+    chats, *day_events = await asyncio.gather(
+        graph.chats_cached(),
+        graph.calendar_events_cached(date.today()),
+        graph.calendar_events_cached(date.today() - timedelta(days=1)),
+    )
+    events_by_day = {
+        date.today(): day_events[0],
+        date.today() - timedelta(days=1): day_events[1],
+    }
+
     meeting_chats = {}
     for c in chats:
         if c.get("chatType") == "meeting":
@@ -132,77 +182,114 @@ async def sweep() -> dict:
                 "join_url": (c.get("onlineMeetingInfo") or {}).get("joinWebUrl"),
             }
 
-    summarized, skipped = 0, 0
-    for d in (date.today(), date.today() - timedelta(days=1)):
-        for e in await graph.calendar_events(d):
+    # Phase 1: Identify meetings needing summarization.
+    # Pre-batch: 1 query to find already-done meetings (replaces N SELECT status per meeting).
+    candidates = []  # (d, e, subject, ext_id, info)
+    for d, events in events_by_day.items():
+        for e in events:
             subject = (e.get("subject") or "").strip()
             end_local = e.get("end_local")
             if not subject or not end_local:
                 continue
             if datetime.fromisoformat(end_local) > now - timedelta(minutes=5):
-                continue  # not ended yet
-
+                continue
             ext_id = f"{d.isoformat()}:{subject.lower()}"
-            item_id, is_new = db.upsert_item(
-                source="meeting_summary", type_="meeting_summary", external_id=ext_id,
-                subject=subject, received_at=end_local,
-                content=f"summary of {subject} on {d.isoformat()}")
-            if not is_new:
-                row = db.query("SELECT status FROM items WHERE id=?", (item_id,))[0]
-                if row["status"] == "done":
-                    skipped += 1
-                    continue
+            candidates.append((d, e, subject, ext_id, meeting_chats.get(subject.lower(), {})))
 
-            info = meeting_chats.get(subject.lower(), {})
-            material, label = None, "none"
-            if info.get("join_url"):
-                material = await _transcript_material(info["join_url"])
-                if material:
-                    label = "transcript"
-            if material is None and info.get("chat_id"):
-                # transcript not pullable (no access or none exists): ask once
-                # in the meeting's own chat for the recording/transcript link
-                await _ask_for_transcript(info["chat_id"], subject, ext_id, item_id)
-                material = await _chat_material(info["chat_id"])
-                if material:
-                    label = "chat"
+    done_ext_ids: set[str] = set()
+    if candidates:
+        all_ext = [c[3] for c in candidates]
+        ph = ",".join("?" * len(all_ext))
+        done_ext_ids = {r["external_id"] for r in db.query(
+            f"SELECT external_id FROM items WHERE source='meeting_summary' AND status='done' "
+            f"AND external_id IN ({ph})", tuple(all_ext))}
 
-            try:
-                vault.create_note(d)
-                # don't double-write if a summary for this meeting already exists
-                # (e.g. from the board's manual summarize button)
-                existing = vault.note_path(d).read_text()
-                if f"{subject} (summary by Chief" in existing or f"{subject} (transcript summary" in existing:
-                    db.update_item(item_id, status="done", action_taken="summary already in note")
-                    skipped += 1
-                    continue
-                start = (e.get("start_local") or "")[11:16]
-                if material is None:
-                    block = (f"{subject} ({start}): no transcript, recording, or chat "
-                             "activity available to summarize.")
-                else:
-                    source = ("meeting transcript" if label == "transcript"
-                              else "Teams meeting chat (no transcript available)")
-                    summary = await run_agent(
-                        CHIEF, SUMMARY_PROMPT.format(subject=subject, day=d.isoformat(),
-                                                     source=source, material=material),
-                        with_tools=False, max_turns=4)
-                    summary = (summary or "").strip()
-                    if not summary:
-                        raise RuntimeError("empty summary")
-                    block = f"{subject} (summary by Chief, from {label}):\n{summary}"
-                vault.append_as_chieff(d, "Notes / Decisions Today", block)
-                db.update_item(item_id, status="done",
-                               action_taken=f"summarized to daily note (source: {label})")
-                db.audit("note_written", {"date": d.isoformat(), "meeting": subject,
-                                          "source": label, "summary": block[:1500]},
-                         item_id=item_id)
-                vault.chieff_trace("Meetings", f"summarized '{subject}' (from {label}) "
-                                               f"into the user's daily note")
-                summarized += 1
-            except Exception:
-                log.exception("summary failed for %s", subject)
-                db.update_item(item_id, status="new")  # retry next sweep
+    pending = []
+    skipped = sum(1 for c in candidates if c[3] in done_ext_ids)
+    for d, e, subject, ext_id, info in candidates:
+        if ext_id in done_ext_ids:
+            continue
+        item_id, _ = db.upsert_item(
+            source="meeting_summary", type_="meeting_summary", external_id=ext_id,
+            subject=subject, received_at=e.get("end_local"),
+            content=f"summary of {subject} on {d.isoformat()}")
+        pending.append((d, e, subject, item_id, info, ext_id))
+
+    if not pending:
+        log.info("meeting summaries: 0 written, %d already done", skipped)
+        return {"summarized": 0, "already_done": skipped,
+                "transcripts_auth_ok": db.get_setting("transcripts_auth_ok")}
+
+    # Phase 2: Fetch material for all pending meetings concurrently.
+    async def _get_material(d, e, subject, item_id, info, ext_id):
+        material, label = None, "none"
+        if info.get("join_url"):
+            material = await _transcript_material(info["join_url"])
+            if material:
+                label = "transcript"
+        if material is None and info.get("chat_id"):
+            await _ask_for_transcript(info["chat_id"], subject, ext_id, item_id)
+            material = await _chat_material(info["chat_id"])
+            if material:
+                label = "chat"
+        return (d, e, subject, item_id, ext_id, material, label)
+
+    materialized = await asyncio.gather(*[_get_material(*m) for m in pending])
+
+    # Phase 3: Run LLM summaries concurrently for meetings that have material.
+    async def _summarize(d, e, subject, item_id, ext_id, material, label):
+        if material is None:
+            return (d, e, subject, item_id, label, None)
+        try:
+            source = ("meeting transcript" if label == "transcript"
+                      else "Teams meeting chat (no transcript available)")
+            summary = await run_agent(
+                CHIEF, SUMMARY_PROMPT.format(subject=subject, day=d.isoformat(),
+                                             source=source, material=material),
+                with_tools=False, max_turns=4)
+            return (d, e, subject, item_id, label, (summary or "").strip() or None)
+        except Exception:
+            log.exception("summary agent failed for %s", subject)
+            return (d, e, subject, item_id, label, None)
+
+    summarized_results = await asyncio.gather(*[_summarize(*m) for m in materialized])
+
+    # Phase 4: Write to vault sequentially (file I/O must not interleave).
+    summarized = 0
+    for d, e, subject, item_id, label, summary in summarized_results:
+        try:
+            vault.create_note(d)
+            existing = vault.note_path(d).read_text()
+            if f"{subject} (summary by Chief" in existing or f"{subject} (transcript summary" in existing:
+                db.update_item(item_id, status="done", action_taken="summary already in note")
+                skipped += 1
+                continue
+            start = (e.get("start_local") or "")[11:16]
+            if summary is None:
+                block = (f"{subject} ({start}): no transcript, recording, or chat "
+                         "activity available to summarize.")
+            else:
+                block = f"{subject} (summary by Chief, from {label}):\n{summary}"
+            vault.append_as_chieff(d, "Notes / Decisions Today", block)
+            db.update_item(item_id, status="done",
+                           action_taken=f"summarized to daily note (source: {label})")
+            db.audit("note_written", {"date": d.isoformat(), "meeting": subject,
+                                      "source": label, "summary": block[:1500]},
+                     item_id=item_id)
+            # Extract the user's action items from the summary → open loops on the board.
+            if summary:
+                loops_created = sum(
+                    1 for a in _extract_owner_actions(summary, subject)
+                    if _upsert_action_loop(a, subject, d, item_id))
+                if loops_created:
+                    vault.chieff_trace("Meetings", f"auto-created {loops_created} open loop(s) "
+                                                   f"from '{subject}' summary")
+            vault.chieff_trace("Meetings", f"summarized '{subject}' (from {label}) "
+                                           f"into the user's daily note")
+            summarized += 1
+        except Exception:
+            log.exception("vault write failed for %s", subject)
+            db.update_item(item_id, status="new")
 
     log.info("meeting summaries: %d written, %d already done", summarized, skipped)
     return {"summarized": summarized, "already_done": skipped,

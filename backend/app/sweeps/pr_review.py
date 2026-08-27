@@ -23,6 +23,30 @@ log = logging.getLogger("chief.sweep.pr_review")
 
 PR_URL_RE = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 
+# Simple in-process cache: GitHub full name → Teams display name (TTL not needed;
+# names don't change often and the process restarts daily at most).
+_name_cache: dict[str, str] = {}
+
+
+async def _teams_display_name(owner_name: str, owner_login: str) -> str:
+    """Try to resolve a GitHub full name to its Teams display name.
+    Falls back gracefully to '@owner_name' on any error."""
+    if not owner_name:
+        return f"@{owner_login}"
+    key = owner_name.lower()
+    if key in _name_cache:
+        return _name_cache[key]
+    try:
+        users = await graph.search_users(owner_name)
+        if users:
+            dn = users[0].get("displayName") or owner_name
+            _name_cache[key] = f"@{dn}"
+            return _name_cache[key]
+    except Exception:
+        pass
+    _name_cache[key] = f"@{owner_name}"
+    return _name_cache[key]
+
 
 class _OutOfScope(Exception):
     """Raised when a PR's repo/queue toggle puts it out of review scope."""
@@ -30,34 +54,81 @@ class _OutOfScope(Exception):
 REVIEW_SCHEMA = {
     "type": "object",
     "properties": {
-        "summary": {"type": "string",
-                    "description": "1-2 short sentences, high level verdict only: what the PR "
-                                   "does and whether it's safe to merge. Plain text, no "
-                                   "backticks, no file-by-file detail."},
+        "verdict": {
+            "type": "string",
+            "enum": ["approved", "needs_changes"],
+            "description": "'approved' if safe to merge with no blocking issues; "
+                           "'needs_changes' if there are critical/high findings that must be fixed first.",
+        },
+        "verified": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 4,
+            "description": "2-4 specific things that were correct and checked out. "
+                           "Name the exact logic, test case, or behavior. "
+                           "e.g. 'the idempotent stamping logic', '171 tests pass', 'the empty-array edge case'.",
+        },
+        "test_result": {
+            "type": "string",
+            "description": "Concise statement about tests: 'tests pass', 'N tests added', "
+                           "'no test coverage for this change', etc. Empty string if not applicable.",
+        },
         "critical": {
             "type": "array",
+            "description": "Must-fix issues only: correctness bugs, security, data loss, "
+                           "breaking changes. Empty if the diff is clean.",
             "items": {
                 "type": "object",
                 "properties": {
                     "severity": {"type": "string", "enum": ["critical", "high"]},
                     "title": {"type": "string"},
                     "file": {"type": "string"},
-                    "detail": {"type": "string"},
+                    "detail": {"type": "string",
+                               "description": "1-3 sentences, concrete, reference the code."},
                 },
                 "required": ["severity", "title", "file", "detail"],
             },
         },
+        "followups": {
+            "type": "array",
+            "description": "Non-blocking suggestions: 'should_fix' (worth doing before Monday), "
+                           "'nit' (minor polish). Omit if nothing worth noting.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["should_fix", "nit"]},
+                    "title": {"type": "string"},
+                    "detail": {"type": "string"},
+                },
+                "required": ["severity", "title", "detail"],
+            },
+            "maxItems": 3,
+        },
+        "summary": {
+            "type": "string",
+            "description": "1-2 sentence high-level verdict for batch digest only. "
+                           "Plain text, no file-by-file detail.",
+        },
     },
-    "required": ["summary", "critical"],
+    "required": ["verdict", "verified", "test_result", "critical", "followups", "summary"],
 }
 
-REVIEW_PROMPT = """Review this pull request. Report ONLY findings that genuinely matter:
-correctness bugs, security issues, data loss, breaking changes, production risks.
-Severity "critical" = must fix before merge; "high" = should fix. Do NOT report style,
-naming, test coverage wishes, or speculative concerns. If the diff is clean, return an
-empty critical list. detail: 1-3 sentences, concrete, reference the code. No em dashes.
+REVIEW_PROMPT = """Review this pull request as a senior engineer. The PR description and existing comments give you intent context; the diff is what you verify.
 
-PR metadata:
+Verdict rules:
+- "approved": safe to merge with no blocking issues (follow-ups are fine).
+- "needs_changes": has critical/high findings that must be fixed before merge.
+
+What to put in critical (must-fix): correctness bugs, security issues, data loss, breaking changes, production risks.
+What to put in followups (should_fix / nit): subtle edge cases, test coverage gaps, minor code quality. Max 3.
+What to omit entirely: style, naming, speculative concerns, anything you can't confirm from the diff.
+
+For "verified": be concrete — name the exact logic, test cases, or behavior you checked, like "the empty-array branch in x()", "TC-006 classification", "171 tests pass". Not generic phrases like "logic is correct".
+For "test_result": state the test situation precisely — "N tests added and pass", "existing tests pass", "no test coverage for this change".
+
+IMPORTANT: you see ONLY the diff. Do NOT flag something as missing unless the diff itself removes it or the PR clearly depends on something absent. Prefer false negatives over false positives — a confident wrong finding wastes the team's time.
+
+PR metadata (title, author, description, existing comments):
 {meta}
 
 Diff (may be truncated at {cap} chars):
@@ -85,6 +156,17 @@ def _queue_disabled(url: str) -> bool:
     return url.lower() in set(json.loads(db.get_setting("pr_queue_disabled", "[]")))
 
 
+def paused() -> bool:
+    """Global pause for ALL PR-review automation (reviews, chat posts, GitHub
+    comments, digest). DB setting 'pr_review_paused' is the live board/API
+    override; otherwise the policy.yaml default applies. Paused while the
+    review quality is being tuned (see feedback 2026-07)."""
+    v = db.get_setting("pr_review_paused")
+    if v is not None:
+        return v == "true"
+    return bool(policy().get("pr_review", {}).get("paused", False))
+
+
 def _find_chat_id(chats: list[dict], topic: str) -> str | None:
     for c in chats:
         if (c.get("topic") or "").strip().lower() == topic.strip().lower():
@@ -110,13 +192,45 @@ def _is_stale_orphan(item_id: int, timeout: int) -> bool:
             and (rows[0]["updated_at"] or "") < db.cutoff(minutes=stale_after))
 
 
+_REVIEW_SEM = asyncio.Semaphore(3)  # max 3 concurrent reviews (GH + Teams rate limits)
+
+
+async def _review_parallel(
+    items: list[tuple[str, int]],
+    chat_id: str,
+    cfg: dict,
+    *,
+    chat_posts: bool = True,
+) -> list[dict]:
+    """Run up to 3 PR reviews concurrently and return successful results."""
+
+    async def _one(url: str, item_id: int) -> dict | None:
+        async with _REVIEW_SEM:
+            try:
+                return await _review_one(url, chat_id, item_id, cfg, chat_posts=chat_posts)
+            except _OutOfScope:
+                return None
+            except Exception as e:
+                log.exception("pr review failed for %s", url)
+                db.update_item(item_id, status="dismissed",
+                               action_taken=f"review failed: {str(e)[:150]}")
+                db.audit("pr_review_error", {"pr_url": url, "error": str(e)[:300]},
+                         item_id=item_id)
+                return None
+
+    raw = await asyncio.gather(*[_one(u, i) for u, i in items])
+    return [r for r in raw if r is not None]
+
+
 async def sweep() -> dict:
+    if paused():
+        return {"skipped": "pr_review paused (tuning)"}
     cfg = policy().get("pr_review", {})
     topic = cfg.get("chat_topic")
     if not topic:
         return {"skipped": "no pr_review.chat_topic in policy.yaml"}
 
-    chats = await graph.list_chats(top=50)
+    chats = await graph.chats_cached()
     chat_id = _find_chat_id(chats, topic)
     if not chat_id:
         return {"error": f"chat '{topic}' not found"}
@@ -152,19 +266,7 @@ async def sweep() -> dict:
 
     # More than 3 reviews in one batch: one combined chat message, no per-PR posts.
     batch = len(new_items) > 3
-    results = []
-    for url, item_id in new_items:
-        try:
-            results.append(await _review_one(url, chat_id, item_id, cfg,
-                                             chat_posts=not batch))
-        except _OutOfScope:
-            continue  # repo/PR out of scope, silently skip
-        except Exception as e:
-            log.exception("pr review failed for %s", url)
-            db.update_item(item_id, status="dismissed",
-                           action_taken=f"review failed: {str(e)[:150]}")
-            db.audit("pr_review_error", {"pr_url": url, "error": str(e)[:300]},
-                     item_id=item_id)
+    results = await _review_parallel(new_items, chat_id, cfg, chat_posts=not batch)
     if batch and results:
         await _post_combined(chat_id, results)
 
@@ -178,29 +280,94 @@ def _pr_link(url: str) -> str:
 
 
 async def _post_combined(chat_id: str, results: list[dict], label: str = ""):
-    """One HTML chat message covering a whole batch of reviews. Teams renders
-    chat messages as HTML, so we use <p>/<ul>/<a>, not plain text + newlines.
-    No @mentions here: pinging everyone in a digest is noise."""
+    """One HTML chat message covering a whole batch of reviews."""
     emoji = policy().get("chieff", {}).get("emoji", "🤖")
-    clean = [r for r in results if not r["critical"]]
-    flagged = [r for r in results if r["critical"]]
+    approved = [r for r in results if r.get("verdict") == "approved"]
+    needs_changes = [r for r in results if r.get("verdict") != "approved"]
+    # Fall back to critical count for old callers that don't have 'verdict'
+    if not any("verdict" in r for r in results):
+        approved = [r for r in results if not r["critical"]]
+        needs_changes = [r for r in results if r["critical"]]
     title = f"PR review{(' &mdash; ' + label) if label else ''}"
     parts = [f"<p>{emoji} <b>{title}</b> &nbsp;|&nbsp; {len(results)} reviewed &middot; "
-             f"<b>{len(flagged)} need attention</b> &middot; {len(clean)} clean</p>"]
-    if flagged:
-        parts.append("<p><b>⚠️ Needs attention</b> &nbsp;<i>(findings commented on each PR)</i></p><ul>")
-        for r in flagged:
+             f"<b>{len(needs_changes)} need changes</b> &middot; {len(approved)} approved</p>"]
+    if needs_changes:
+        parts.append("<p><b>🔴 Needs changes</b> &nbsp;<i>(findings on each PR)</i></p><ul>")
+        for r in needs_changes:
             n = r["critical"]
-            cnt = f"<b>{n} findings</b>" if n > 1 else "1 finding"
+            cnt = f"<b>{n} blocking</b>" if n > 1 else "1 blocking"
             parts.append(f"<li>{_pr_link(r['url'])} &nbsp;&middot;&nbsp; {r['owner_name']} "
                          f"&nbsp;&middot;&nbsp; {cnt}</li>")
         parts.append("</ul>")
-    if clean:
-        parts.append("<p><b>✅ Clean &mdash; safe to merge</b></p><ul>")
-        for r in clean:
-            parts.append(f"<li>{_pr_link(r['url'])} &nbsp;&middot;&nbsp; {r['owner_name']}</li>")
+    if approved:
+        parts.append("<p><b>✅ Approved</b></p><ul>")
+        for r in approved:
+            blurb = f" &mdash; {r['summary'][:80]}" if r.get("summary") else ""
+            parts.append(f"<li>{_pr_link(r['url'])} &nbsp;&middot;&nbsp; {r['owner_name']}{blurb}</li>")
         parts.append("</ul>")
     await actions.pr_review_chat_post(chat_id, "".join(parts), item_id=None)
+
+
+def _format_review_chat(url: str, owner_tag: str, verdict: str,
+                        verified: list[str], test_result: str,
+                        critical: list[dict], followups: list[dict],
+                        summary: str) -> str:
+    """Build the Teams chat post in the team's short review style.
+
+    Pattern: @Author #NNN approved/needs changes - [verified, test_result].
+    [Follow-ups ranked: should-fix / nit].
+    """
+    import html as _h
+    pr_num = re.search(r"/pull/(\d+)", url)
+    num_label = f"#{pr_num.group(1)}" if pr_num else ""
+    pr_anchor = f'<a href="{_h.escape(url)}">{num_label}</a>' if num_label else f'<a href="{url}">{url}</a>'
+
+    # -- verdict clause --
+    if verdict == "approved":
+        verdict_word = "approved"
+    else:
+        verdict_word = f"<b>needs changes</b> ({len(critical)} blocking)"
+
+    # -- what was verified --
+    body_parts = []
+    if verified:
+        body_parts.append(", ".join(_h.escape(v) for v in verified[:3]))
+        if body_parts[-1] and not body_parts[-1].endswith("."):
+            if test_result:
+                body_parts[-1] += f"; {_h.escape(test_result)}"
+            else:
+                body_parts[-1] += " all check out"
+    elif test_result:
+        body_parts.append(_h.escape(test_result))
+
+    # -- critical summary --
+    if critical:
+        titles = "; ".join(_h.escape(c["title"])[:60] for c in critical[:2])
+        extra = f" (+ {len(critical)-2} more)" if len(critical) > 2 else ""
+        body_parts.append(f"blocking: {titles}{extra} — details on the PR")
+
+    # -- follow-ups --
+    followup_parts = []
+    should_fixes = [f for f in followups if f.get("severity") == "should_fix"]
+    nits = [f for f in followups if f.get("severity") == "nit"]
+    if should_fixes:
+        titles = "; ".join(_h.escape(f["title"])[:60] for f in should_fixes[:2])
+        followup_parts.append(f"One should-fix: {titles}")
+    if nits:
+        cnt = len(nits)
+        followup_parts.append(f"{cnt} nit{'s' if cnt > 1 else ''}: " +
+                               "; ".join(_h.escape(f["title"])[:50] for f in nits[:2]))
+
+    body = ("; ".join(body_parts) + ".") if body_parts else (
+        _h.escape(summary[:200]) if summary else "clean diff, no findings.")
+
+    followup_sentence = ". ".join(followup_parts) if followup_parts else ""
+
+    text = f"{owner_tag} {pr_anchor} {verdict_word} &mdash; {body}"
+    if followup_sentence:
+        text += f" {followup_sentence}."
+
+    return f"<p>{text}</p>"
 
 
 async def _review_one(url: str, chat_id: str, item_id: int, cfg: dict,
@@ -211,14 +378,22 @@ async def _review_one(url: str, chat_id: str, item_id: int, cfg: dict,
         db.update_item(item_id, status="dismissed", action_taken="out of review scope")
         raise _OutOfScope(url)
     rc, meta_raw = await _gh("pr", "view", url, "--json",
-                             "title,author,state,baseRefName,headRefName,additions,deletions,files")
+                             "title,author,state,baseRefName,headRefName,additions,deletions,"
+                             "files,body,comments")
     if rc != 0:
         raise RuntimeError(f"gh pr view: {meta_raw[:200]}")
     meta = json.loads(meta_raw)
+    # Never review a PR that already merged/closed: a review landing hours/days
+    # after merge is pure noise (and shows up as a stale "safe to merge" call).
+    state = (meta.get("state") or "").upper()
+    if state and state != "OPEN":
+        db.update_item(item_id, status="dismissed",
+                       action_taken=f"skipped: PR already {state.lower()} (no late reviews)")
+        raise _OutOfScope(url)
     author = meta.get("author") or {}
     owner_name = (author.get("name") or "").strip()
     owner_login = author.get("login", "unknown")
-    owner_tag = f"@{owner_name}" if owner_name else owner_login
+    owner_tag = await _teams_display_name(owner_name, owner_login)
     title = meta.get("title", url)
 
     db.update_item(item_id, sender=owner_login, subject=title, status="classified",
@@ -236,11 +411,21 @@ async def _review_one(url: str, chat_id: str, item_id: int, cfg: dict,
     rc, diff = await _gh("pr", "diff", url)
     if rc != 0:
         raise RuntimeError(f"gh pr diff: {diff[:200]}")
+    # PR description (body) gives crucial intent context for better reviews.
+    pr_body = (meta.get("body") or "").strip()[:2000]
+    # Existing review comments help understand what's already been discussed.
+    existing_comments = [
+        {"author": (c.get("author") or {}).get("login", "?"),
+         "body": (c.get("body") or "")[:300]}
+        for c in (meta.get("comments") or [])[-5:]  # last 5 only
+    ]
     meta_brief = {
         "url": url, "title": title, "author": owner_login,
         "base": meta.get("baseRefName"), "head": meta.get("headRefName"),
         "additions": meta.get("additions"), "deletions": meta.get("deletions"),
         "files": [f.get("path") for f in (meta.get("files") or [])][:50],
+        "description": pr_body or "(no description)",
+        "existing_comments": existing_comments,
     }
     result = await asyncio.wait_for(
         run_agent(
@@ -251,45 +436,52 @@ async def _review_one(url: str, chat_id: str, item_id: int, cfg: dict,
             model=cfg.get("model", "claude-sonnet-4-6"), label="pr_review"),
         timeout=int(cfg.get("review_timeout_seconds", 300)))
     if not isinstance(result, dict):
-        # Agent finished without structured output (e.g. huge diff hit max_turns).
         raise RuntimeError("review produced no structured result (diff too large?)")
     critical = result.get("critical") or []
+    followups = result.get("followups") or []
+    verdict = result.get("verdict", "approved" if not critical else "needs_changes")
+    verified = result.get("verified") or []
+    test_result = (result.get("test_result") or "").strip()
     summary = (result.get("summary") or "").strip()
-    db.audit("pr_reviewed", {"pr_url": url, "summary": summary,
-                             "critical_count": len(critical), "critical": critical},
+    db.audit("pr_reviewed", {"pr_url": url, "verdict": verdict, "summary": summary,
+                             "critical_count": len(critical), "critical": critical,
+                             "followups": followups},
              item_id=item_id)
 
-    # 3. post critical parts on the PR (skip the comment entirely when clean).
-    # GitHub renders Markdown, so headers/lists/code spans format cleanly there.
-    if critical:
-        lines = [f"## {emoji} Automated review",
-                 f"Critical findings only ({len(critical)}). Style nits omitted.", ""]
-        for c in critical:
-            lines.append(f"### `{c['severity']}` &mdash; {c['title']}")
-            lines.append(f"**File:** `{c['file']}`")
-            lines.append("")
-            lines.append(c["detail"])
-            lines.append("")
+    # 3. post findings on the GitHub PR (only when there's something to say)
+    if critical or followups:
+        lines = [f"## {emoji} Code review"]
+        lines.append(f"**Verdict:** {'✅ approved' if verdict == 'approved' else '🔴 needs changes'}")
+        if verified:
+            lines.append(f"**Verified:** {', '.join(verified)}")
+        if test_result:
+            lines.append(f"**Tests:** {test_result}")
+        lines.append("")
+        if critical:
+            lines.append(f"### Blocking ({len(critical)})")
+            for c in critical:
+                lines.append(f"\n**`{c['severity']}`** — {c['title']}  \n"
+                              f"**File:** `{c['file']}`  \n{c['detail']}")
+        if followups:
+            lines.append(f"\n### Follow-ups ({len(followups)})")
+            for f in followups:
+                lines.append(f"\n**{f['severity'].replace('_', '-')}** — {f['title']}  \n{f['detail']}")
         await actions.post_github_comment(url, "\n".join(lines), item_id=item_id)
 
-    # 4. short summary back in the chat, tagging the owner: verdict + link only
+    # 4. Short chat message: "@Author #NNN approved - [verified]. [follow-ups]."
     if chat_posts:
-        if critical:
-            n = len(critical)
-            cnt = f"{n} critical/high findings" if n > 1 else "1 critical/high finding"
-            msg = (f"<p>{emoji} {owner_tag}, reviewed {_pr_link(url)}: <b>{cnt}</b>, "
-                   f"details on the PR.</p>")
-        else:
-            msg = (f"<p>{emoji} {owner_tag}, reviewed {_pr_link(url)}: "
-                   f"no critical findings.</p><p>{summary}</p>")
+        msg = _format_review_chat(url, owner_tag, verdict, verified, test_result,
+                                  critical, followups, summary)
         await actions.pr_review_chat_post(chat_id, msg, item_id=item_id)
+
     db.update_item(item_id, status="done",
-                   action_taken=f"reviewed: {len(critical)} critical finding(s)")
+                   action_taken=f"reviewed ({verdict}): {len(critical)} critical, {len(followups)} followups")
     from .. import vault
     vault.chieff_trace("GitHub", f"reviewed PR {url} ({owner_login}): "
-                                 f"{len(critical)} critical/high finding(s)")
+                                 f"{verdict}, {len(critical)} critical, {len(followups)} followups")
     return {"url": url, "owner_tag": owner_tag, "owner_name": owner_name or owner_login,
-            "title": title, "critical": len(critical), "summary": summary}
+            "title": title, "critical": len(critical), "summary": summary,
+            "verdict": verdict}
 
 
 async def requeue_orphans() -> dict:
@@ -302,9 +494,11 @@ async def requeue_orphans() -> dict:
     reviews each directly. Already-merged/closed PRs are skipped (reviewing them
     days late is noise) and marked dismissed. Results post as ONE combined chat
     message -- no per-PR acks or @mentions for a recovery batch."""
+    if paused():
+        return {"skipped": "pr_review paused (tuning)"}
     cfg = policy().get("pr_review", {})
     topic = cfg.get("chat_topic")
-    chat_id = _find_chat_id(await graph.list_chats(top=50), topic) if topic else None
+    chat_id = _find_chat_id(await graph.chats_cached(), topic) if topic else None
     if not chat_id:
         return {"error": f"chat '{topic}' not found"}
 
@@ -347,9 +541,11 @@ async def review_recent(days: int = 1) -> dict:
     import json as _json
     from datetime import date, timedelta
 
+    if paused():
+        return {"skipped": "pr_review paused (tuning)"}
     cfg = policy().get("pr_review", {})
     topic = cfg.get("chat_topic")
-    chat_id = _find_chat_id(await graph.list_chats(top=50), topic) if topic else None
+    chat_id = _find_chat_id(await graph.chats_cached(), topic) if topic else None
     if not chat_id:
         return {"error": f"chat '{topic}' not found"}
     prefixes = cfg.get("batch_repo_prefixes", ["arc-"])
@@ -364,6 +560,9 @@ async def review_recent(days: int = 1) -> dict:
 
     todo: list[tuple[str, int]] = []
     skipped_bots = skipped_done = 0
+
+    # First pass: apply cheap filters, collect candidates
+    candidates: list[tuple[str, dict]] = []
     for p in prs:
         repo = p["repository"]["nameWithOwner"].split("/")[-1]
         login = (p.get("author") or {}).get("login", "")
@@ -375,30 +574,30 @@ async def review_recent(days: int = 1) -> dict:
         url = p["url"].lower()
         if _repo_disabled(url) or _queue_disabled(url):
             continue
+        candidates.append((url, p))
+
+    # Pre-batch: 1 query to find already-done PRs (replaces N individual status SELECTs)
+    done_urls: set[str] = set()
+    if candidates:
+        cand_urls = [u for u, _ in candidates]
+        done_ph = ",".join("?" * len(cand_urls))
+        done_urls = {r["external_id"] for r in db.query(
+            f"SELECT external_id FROM items WHERE source='pr_review' AND status='done' "
+            f"AND external_id IN ({done_ph})",
+            tuple(cand_urls))}
+
+    for url, p in candidates:
+        if url in done_urls:
+            skipped_done += 1
+            continue
         item_id, is_new = db.upsert_item(
             source="pr_review", type_="pr_review", external_id=url,
             conversation_id=chat_id, subject=topic, content=url)
-        if not is_new:
-            rows = db.query("SELECT status FROM items WHERE id=?", (item_id,))
-            if rows and rows[0]["status"] == "done":
-                skipped_done += 1
-                continue
         todo.append((url, item_id))
 
-    results, failed = [], 0
-    for url, item_id in todo:
-        try:
-            results.append(await _review_one(url, chat_id, item_id, cfg,
-                                             chat_posts=False))
-        except _OutOfScope:
-            continue  # repo/PR out of scope, silently skip
-        except Exception as e:
-            failed += 1
-            log.exception("batch review failed for %s", url)
-            db.update_item(item_id, status="dismissed",
-                           action_taken=f"review failed: {str(e)[:150]}")
-            db.audit("pr_review_error", {"pr_url": url, "error": str(e)[:300]},
-                     item_id=item_id)
+    results = await _review_parallel(todo, chat_id, cfg, chat_posts=False)
+    failed = len(todo) - len(results) - sum(
+        1 for u, _ in todo if _repo_disabled(u) or _queue_disabled(u))
 
     if results:
         await _post_combined(chat_id, results, label=f"last {days + 1} days")

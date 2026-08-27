@@ -1,17 +1,20 @@
 import React, { useEffect, useState } from 'react'
 import {
-  ChevronRight, FileText, Copy, Check, ExternalLink, NotebookPen, MessagesSquare, CircleSlash,
+  ChevronRight, FileText, Copy, Check, ExternalLink, NotebookPen, MessagesSquare, CircleSlash, BookOpen,
 } from 'lucide-react'
 import { Panel } from '../App.jsx'
 import { Empty } from './AdoPanel.jsx'
 import { post } from '../api.js'
+import { useToast } from '../ui.jsx'
 
 export default function MeetingsPanel() {
   const [meetings, setMeetings] = useState([])
   const [busyId, setBusyId] = useState(null)
+  const [capturingId, setCapturingId] = useState(null)
   const [open, setOpen] = useState(null)
   const [transcripts, setTranscripts] = useState({}) // chat_id -> {loading, text, count}
   const [copied, setCopied] = useState(null)
+  const toast = useToast()
 
   const load = () =>
     fetch('/api/meetings').then((r) => r.json()).then(setMeetings).catch(() => {})
@@ -60,6 +63,45 @@ export default function MeetingsPanel() {
     }
   }
 
+  const createMeetingNote = async (m) => {
+    setCapturingId(m.id)
+    try {
+      const date = m.day
+      const time = fmt(m.start_local)
+      const attendees = (m.attendees || [])
+        .filter(a => a?.emailAddress?.address)
+        .map(a => a.emailAddress.name || a.emailAddress.address)
+        .join(', ')
+      const content = [
+        `# ${m.subject}`,
+        '',
+        `**Date:** ${date} ${time}`,
+        attendees ? `**Attendees:** ${attendees}` : '',
+        '',
+        '## Notes',
+        '',
+        '## Action Items',
+        '',
+        '## Decisions',
+        '',
+        '---',
+        `*Created from Chief of Staff*`,
+      ].filter(s => s !== null).join('\n')
+      const r = await fetch('/api/obsidian/note', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: `${date} ${m.subject}`.slice(0, 80), content, folder: 'Chieff' }),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      const data = await r.json()
+      toast(`Meeting note created: ${data.path}`, 'success')
+    } catch (e) {
+      toast(`Could not create note: ${String(e).slice(0, 100)}`, 'error')
+    } finally {
+      setCapturingId(null)
+    }
+  }
+
   const fmt = (iso) =>
     iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
 
@@ -95,6 +137,15 @@ export default function MeetingsPanel() {
                     {m.day.slice(5)} · {fmt(m.start_local)}
                   </span>
                   <span className="truncate text-sm font-medium text-zinc-200">{m.subject}</span>
+                  {(() => {
+                    const att = (m.attendees || []).filter(a => a?.emailAddress?.address)
+                    return att.length > 0 && (
+                      <span className="hidden truncate text-[11px] text-zinc-500 md:block">
+                        {att.slice(0, 3).map(a => a.emailAddress.name || a.emailAddress.address.split('@')[0]).join(', ')}
+                        {att.length > 3 && ` +${att.length - 3}`}
+                      </span>
+                    )
+                  })()}
                   <span className="ml-2 flex shrink-0 items-center gap-1.5">
                     {src.length === 0 ? (
                       <span className="flex items-center gap-1 text-[11px] text-zinc-600">
@@ -120,6 +171,14 @@ export default function MeetingsPanel() {
                     <ExternalLink size={14} />
                   </a>
                 )}
+                <button
+                  disabled={capturingId === m.id}
+                  onClick={(e) => { e.stopPropagation(); createMeetingNote(m) }}
+                  title="Create meeting notes template in Obsidian"
+                  className="press grid h-7 w-7 shrink-0 place-items-center rounded-lg text-zinc-500 hover:bg-violet-900/40 hover:text-violet-300 disabled:opacity-40"
+                >
+                  <BookOpen size={14} className={capturingId === m.id ? 'animate-pulse' : ''} />
+                </button>
                 <button
                   disabled={busyId === m.id}
                   onClick={() => summarize(m)}

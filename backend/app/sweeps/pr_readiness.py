@@ -57,24 +57,41 @@ def _ci_state(rollup) -> str:
     return "passing"
 
 
-def _review_status(url: str) -> dict:
-    """Has CoS already reviewed this PR, and were there open critical findings?"""
-    rows = db.query("SELECT id FROM items WHERE source='pr_review' AND external_id=?",
-                    (url.lower(),))
-    if not rows:
-        return {"reviewed": False, "criticals": 0}
-    aud = db.query("SELECT detail FROM audit_log WHERE action='pr_reviewed' "
-                   "AND item_id=? ORDER BY id DESC LIMIT 1", (rows[0]["id"],))
-    if not aud:
-        return {"reviewed": False, "criticals": 0}
-    try:
-        d = json.loads(aud[0]["detail"])
-        return {"reviewed": True, "criticals": int(d.get("critical_count") or 0)}
-    except Exception:
-        return {"reviewed": True, "criticals": 0}
+def _review_statuses_batch(urls: list[str]) -> dict[str, dict]:
+    """Batch version of _review_status: 2 queries total regardless of how many PRs."""
+    if not urls:
+        return {}
+    lower_urls = [u.lower() for u in urls]
+    ph = ",".join("?" * len(lower_urls))
+    item_rows = db.query(
+        f"SELECT id, external_id FROM items WHERE source='pr_review' AND external_id IN ({ph})",
+        tuple(lower_urls))
+    item_by_url = {r["external_id"]: r["id"] for r in item_rows}
+    result: dict[str, dict] = {u: {"reviewed": False, "criticals": 0} for u in lower_urls}
+    if not item_by_url:
+        return result
+    item_ids = list(item_by_url.values())
+    id_ph = ",".join("?" * len(item_ids))
+    aud_rows = db.query(
+        f"SELECT item_id, detail FROM audit_log WHERE action='pr_reviewed' "
+        f"AND item_id IN ({id_ph}) "
+        f"AND id IN (SELECT MAX(id) FROM audit_log WHERE action='pr_reviewed' GROUP BY item_id)",
+        tuple(item_ids))
+    aud_by_item = {r["item_id"]: r["detail"] for r in aud_rows}
+    for url, item_id in item_by_url.items():
+        detail = aud_by_item.get(item_id)
+        if not detail:
+            result[url] = {"reviewed": False, "criticals": 0}
+            continue
+        try:
+            d = json.loads(detail)
+            result[url] = {"reviewed": True, "criticals": int(d.get("critical_count") or 0)}
+        except Exception:
+            result[url] = {"reviewed": True, "criticals": 0}
+    return result
 
 
-def _evaluate(meta: dict, cfg: dict) -> dict:
+def _evaluate(meta: dict, cfg: dict, rev: dict | None = None) -> dict:
     files = [f.get("path", "") for f in (meta.get("files") or [])]
     is_draft = bool(meta.get("isDraft"))
     ci = _ci_state(meta.get("statusCheckRollup"))
@@ -87,7 +104,8 @@ def _evaluate(meta: dict, cfg: dict) -> dict:
     has_test = any(any(m in p.lower() for m in markers) for p in files)
     tests_missing = bool(touches_required) and not has_test
 
-    rev = _review_status(meta["url"])
+    if rev is None:
+        rev = _review_statuses_batch([meta["url"]]).get(meta["url"].lower(), {"reviewed": False, "criticals": 0})
 
     checks = [
         {"key": "draft", "label": "Opened as draft", "ok": is_draft,
@@ -111,11 +129,14 @@ def _evaluate(meta: dict, cfg: dict) -> dict:
     return {
         "url": meta["url"], "number": meta.get("number"), "title": meta.get("title", ""),
         "repo": (meta.get("headRepository") or {}).get("name") or meta.get("_repo", ""),
+        "owner": ((meta.get("author") or {}).get("name") or "").strip()
+                 or (meta.get("author") or {}).get("login", "?"),
         "is_draft": is_draft, "ci": ci, "checks": checks,
         "blockers": [c["key"] for c in blockers],
         "ready": ready,
-        # the loud case: a Ready PR that isn't actually clean
-        "needs_attention": bool(blockers) and (not is_draft or len(blockers) > 0),
+        # the loud case: a Ready PR that isn't actually clean (a draft with
+        # blockers is just normal WIP, not worth flagging)
+        "needs_attention": bool(blockers) and not is_draft,
     }
 
 
@@ -127,18 +148,26 @@ async def sweep() -> dict:
     if prs is None:
         return {"error": "gh search failed"}
 
-    results = []
-    for p in prs:
-        repo = (p.get("repository") or {}).get("name", "")
-        if not any(repo.startswith(pre) for pre in prefixes):
-            continue
+    scoped = [(p, (p.get("repository") or {}).get("name", "")) for p in prs
+              if any((p.get("repository") or {}).get("name", "").startswith(pre) for pre in prefixes)]
+
+    async def _fetch_one(p, repo):
         meta = await _gh_json("pr", "view", p["url"], "--json",
-                              "isDraft,statusCheckRollup,files,reviewDecision,title,number,headRepository")
+                              "isDraft,statusCheckRollup,files,reviewDecision,title,number,headRepository,author")
         if not meta:
-            continue
+            return None
         meta["url"] = p["url"]
         meta["_repo"] = repo
-        results.append(_evaluate(meta, cfg))
+        return meta
+
+    fetched_metas = await asyncio.gather(*[_fetch_one(p, r) for p, r in scoped])
+    valid_metas = [m for m in fetched_metas if m is not None]
+
+    # Batch-resolve review statuses: 2 queries total regardless of PR count.
+    all_urls = [m["url"] for m in valid_metas]
+    review_statuses = _review_statuses_batch(all_urls)
+
+    results = [_evaluate(m, cfg, review_statuses.get(m["url"].lower())) for m in valid_metas]
 
     db.set_setting(STATE_KEY, json.dumps({"prs": results, "at": db.now()}))
 
@@ -146,7 +175,8 @@ async def sweep() -> dict:
     nudged = []
     if cfg.get("nudge", True):
         attention = [r for r in results if r["needs_attention"]]
-        fresh = [r for r in attention if not _recently_nudged(r["url"], cfg)]
+        nudged_set = _batch_recently_nudged([r["url"] for r in attention], cfg)
+        fresh = [r for r in attention if r["url"] not in nudged_set]
         if fresh:
             try:
                 await actions.notify_alex(_nudge_body(fresh), kind="pr_readiness_nudge")
@@ -164,13 +194,18 @@ async def sweep() -> dict:
     return {"checked": len(results), "needs_attention": flagged, "nudged": len(nudged)}
 
 
-def _recently_nudged(url: str, cfg: dict) -> bool:
+def _batch_recently_nudged(urls: list[str], cfg: dict) -> set[str]:
+    """Return the set of URLs nudged within renudge_hours — 1 query for all."""
+    if not urls:
+        return set()
     hours = int(cfg.get("renudge_hours", 20))
+    ph = ",".join("?" * len(urls))
     rows = db.query(
-        "SELECT 1 FROM audit_log WHERE action='pr_readiness_nudge' "
-        "AND json_extract(detail,'$.pr_url')=? AND ts > ? LIMIT 1",
-        (url, db.cutoff(hours=hours)))
-    return bool(rows)
+        f"SELECT json_extract(detail,'$.pr_url') AS url FROM audit_log "
+        f"WHERE action='pr_readiness_nudge' AND ts > ? "
+        f"AND json_extract(detail,'$.pr_url') IN ({ph})",
+        (db.cutoff(hours=hours),) + tuple(urls))
+    return {r["url"] for r in rows}
 
 
 def _nudge_body(prs: list[dict]) -> str:

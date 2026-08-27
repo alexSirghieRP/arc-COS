@@ -40,7 +40,7 @@ export default function ReposPanel() {
         comments stay.
       </p>
       <input
-        className="mb-2 w-full rounded bg-zinc-800 px-2 py-1 text-sm"
+        className="mb-2 w-full rounded border border-transparent bg-zinc-800 px-2 py-1 text-sm outline-none transition-colors focus:border-[var(--accent)]"
         placeholder="filter repos…"
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
@@ -84,8 +84,8 @@ function RepoRow({ r, busy, toggle }) {
           }`}
         >
           <span
-            className={`absolute top-0.5 h-[14px] w-[14px] rounded-full bg-white shadow transition-transform duration-200 ${
-              r.enabled ? 'translate-x-[15px]' : 'translate-x-0.5'
+            className={`absolute left-0 top-0.5 h-[14px] w-[14px] rounded-full bg-white shadow transition-transform duration-200 ${
+              r.enabled ? 'translate-x-[16px]' : 'translate-x-[2px]'
             }`}
           />
         </span>

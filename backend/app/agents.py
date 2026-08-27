@@ -4,11 +4,19 @@ Agents are read/think-only: their tool access never includes send/write tools.
 Every outbound action goes through actions.py where the guardrails live.
 """
 
+import shutil
 from dataclasses import dataclass, field
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 
 from .config import mcp_server_defs, policy
+
+# The SDK bundles its own Claude Code CLI, which lags the org's enforced
+# minimum version (org policy started rejecting the bundled 2.1.173 on
+# 2026-07-14: "older than the minimum version required by your organization").
+# The system CLI (kept current via the org's update channel) works; None
+# falls back to the bundled one if it's ever missing from PATH.
+CLI_PATH = shutil.which("claude")
 
 # Cost-optimal default: Haiku handles the high-volume triage/classification
 # calls (every few minutes). Quality-sensitive callers (PR review, weekly
@@ -31,7 +39,7 @@ def chief_system_prompt() -> str:
     role = me.get("role", "a professional")
     who = f"{name} ({email})" if email else name
     return (
-        f"You are CoS, the chief-of-staff agent for {who}, {role}. You triage their "
+        f"You are Chief, the chief-of-staff agent for {who}, {role}. You triage their "
         "messages, draft replies for their approval, summarize meetings, and keep their "
         "daily note alive. You never send anything yourself; you produce classifications, "
         "drafts, and summaries that the system or the user acts on. " + NO_EM_DASH_RULE
@@ -68,6 +76,9 @@ CHIEF = AgentDef(
 REGISTRY: dict[str, AgentDef] = {a.name: a for a in [CHIEF]}
 
 
+DEFAULT_TIMEOUT_S = 300  # a hung SDK call must never wedge a sweep
+
+
 async def run_agent(
     agent: AgentDef,
     prompt: str,
@@ -76,15 +87,22 @@ async def run_agent(
     max_turns: int = 12,
     model: str | None = None,
     label: str = "agent",
+    timeout: float = DEFAULT_TIMEOUT_S,
 ):
     """One-shot agent run. Returns structured_output dict if schema given, else text.
 
     model overrides the agent's default for this call (use a cheaper model for
     high-volume work, a stronger one for quality-sensitive synthesis). label tags
-    the call's purpose for CoS's own operating-cost breakdown."""
+    the call's purpose for CoS's own operating-cost breakdown. Every run, success
+    or failure, is metered with its duration so the Health tab can show agent
+    error rates and latency; timeout aborts a stuck run."""
+    import asyncio
+    import time as _time
+
     defs = mcp_server_defs()
     sys_prompt = chief_system_prompt() if agent.name == "chief" else agent.system_prompt
     options = ClaudeAgentOptions(
+        cli_path=CLI_PATH,
         model=model or agent.model,
         system_prompt=sys_prompt,
         mcp_servers={n: defs[n] for n in agent.mcp_servers if n in defs} if with_tools else {},
@@ -95,25 +113,40 @@ async def run_agent(
         output_format={"type": "json_schema", "schema": schema} if schema else None,
         setting_sources=[],
     )
-    async for message in query(prompt=prompt, options=options):
-        if isinstance(message, ResultMessage):
-            # meter CoS's own operating cost (best-effort, never blocks the run)
-            try:
-                from . import cost
-                cost.record_run(label, model or agent.model,
-                                getattr(message, "total_cost_usd", 0.0),
-                                getattr(message, "usage", None))
-            except Exception:
-                pass
-            if message.subtype == "success":
-                if schema:
-                    if message.structured_output is None:
-                        # e.g. an inaccessible model returns subtype=success but
-                        # no structured output, with the reason in result.
-                        raise RuntimeError(
-                            "agent returned no structured output (model "
-                            f"{model or agent.model}?): {(message.result or '')[:200]}")
-                    return message.structured_output
-                return message.result
-            raise RuntimeError(f"agent run failed: {message.subtype}")
+
+    t0 = _time.monotonic()
+
+    def _meter(message=None, error: str | None = None):
+        # meter CoS's own operating cost (best-effort, never blocks the run)
+        try:
+            from . import cost
+            cost.record_run(
+                label, model or agent.model,
+                getattr(message, "total_cost_usd", 0.0) if message else 0.0,
+                getattr(message, "usage", None) if message else None,
+                duration_ms=int((_time.monotonic() - t0) * 1000),
+                ok=error is None, error=error)
+        except Exception:
+            pass
+
+    try:
+        async with asyncio.timeout(timeout):
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, ResultMessage):
+                    if message.subtype == "success":
+                        if schema and message.structured_output is None:
+                            # e.g. an inaccessible model returns subtype=success but
+                            # no structured output, with the reason in result.
+                            err = ("agent returned no structured output (model "
+                                   f"{model or agent.model}?): {(message.result or '')[:200]}")
+                            _meter(message, error=err)
+                            raise RuntimeError(err)
+                        _meter(message)
+                        return message.structured_output if schema else message.result
+                    _meter(message, error=f"agent run failed: {message.subtype}")
+                    raise RuntimeError(f"agent run failed: {message.subtype}")
+    except TimeoutError:
+        _meter(error=f"timed out after {timeout:.0f}s")
+        raise RuntimeError(f"agent run timed out after {timeout:.0f}s (label={label})")
+    _meter(error="agent run produced no result")
     raise RuntimeError("agent run produced no result")

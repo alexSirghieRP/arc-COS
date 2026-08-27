@@ -6,15 +6,17 @@ from datetime import date
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import certs, db, graph, mcp_clients, scheduler, vault
+from . import certs, db, graph, health, mcp_clients, scheduler, vault
 from .api import router as api_router
 from .board import router as board_router
 from .config import REPO_ROOT, policy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+health.install_log_buffer()  # board Logs tab reads from this ring buffer
 log = logging.getLogger("chief")
 
 # Trust the corporate TLS-interception CA so Atlassian/Azure REST calls work.
@@ -36,12 +38,46 @@ async def lifespan(app: FastAPI):
     from . import vault
     vault.ensure_chieff_dirs()
     scheduler.start()
+    await scheduler.run_startup_jobs()
+    # the companion runs its own tight adaptive loop (not the 60s scheduler
+    # tick) so it responds in seconds while the user is chatting
+    import asyncio
+    from . import companion
+    companion_task = asyncio.create_task(companion.run_loop())
     yield
+    companion_task.cancel()
+    await companion._session_reset()  # drop the warm CLI session cleanly
     scheduler.scheduler.shutdown(wait=False)
     await mcp_clients.manager.stop()
 
 
 app = FastAPI(title="chief-of-staff", lifespan=lifespan)
+
+# This app can send messages as the user, so defense-in-depth on top of the
+# 127.0.0.1 uvicorn bind: reject any non-loopback client outright (e.g. if the
+# bind is ever changed or forwarded), and set conservative response headers.
+_LOOPBACK = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+@app.middleware("http")
+async def _local_only_and_headers(request: Request, call_next):
+    client = request.client.host if request.client else ""
+    if client not in _LOOPBACK:
+        return JSONResponse({"detail": "local access only"}, status_code=403)
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if request.url.path.startswith("/api"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    elif request.url.path in ("/", "/index.html"):
+        # The HTML shell references content-hashed JS/CSS that vite REPLACES on
+        # every rebuild. A cached shell (WKWebView in the Mac app) then 404s its
+        # dead hashes and renders a black window — force revalidation instead.
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 app.include_router(api_router)
 app.include_router(board_router)
 
@@ -64,7 +100,7 @@ async def smoke(agent: bool = False):
         for e in emails
     ]
 
-    events = await graph.calendar_events(date.today())
+    events = await graph.calendar_events_cached(date.today())
     out["today_calendar"] = [
         {"subject": e.get("subject"), "start": e.get("start_local"), "end": e.get("end_local")}
         for e in events
@@ -81,8 +117,11 @@ async def smoke(agent: bool = False):
         out["latest_daily_note"] = None
 
     try:
+        from . import ado as _ado
+        projects = _ado.configured_projects()
         ado = await mcp_clients.get_manager().call(
-            "azure-devops", "core_list_projects", {"projectNameFilter": "OS Conversions Agent", "top": 3})
+            "azure-devops", "core_list_projects",
+            {"projectNameFilter": projects[0] if projects else "", "top": 3})
         names = [p.get("name") for p in ado] if isinstance(ado, list) else str(ado)[:200]
         out["ado"] = {"ok": True, "projects": names}
     except Exception as e:

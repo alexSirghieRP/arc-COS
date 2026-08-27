@@ -9,8 +9,25 @@ import asyncio
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import mcp_clients
+from . import db, mcp_clients
 from .config import mcp_server_defs, vault_root
+
+_AUTH_FAIL_PATTERNS = ("fetch failed", "not logged in", "unauthenticated",
+                       "invalid_grant", "token expired", "unauthorized",
+                       "no valid access token")
+
+
+def recent_graph_auth_failure() -> str | None:
+    """Return the most recent auth-style error from ms-graph-backed jobs, or None."""
+    rows = db.query(
+        "SELECT error, started_at FROM job_runs "
+        "WHERE job IN ('teams_sweep','email_sweep') AND ok=0 AND error IS NOT NULL "
+        "ORDER BY id DESC LIMIT 20")
+    for r in rows:
+        err = (r["error"] or "").lower()
+        if any(p in err for p in _AUTH_FAIL_PATTERNS):
+            return r["error"]
+    return None
 
 Connector = Callable[[], Awaitable[dict]]
 _registry: dict[str, Connector] = {}
@@ -32,31 +49,53 @@ async def statuses() -> dict[str, dict]:
     }
 
 
-def _mcp_status(server: str) -> dict:
+async def _mcp_status(server: str) -> dict:
     try:
         mgr = mcp_clients.get_manager()
     except RuntimeError:
         return {"connected": False, "detail": "MCP manager not started"}
     if server in mgr.sessions:
-        return {"connected": True, "detail": "MCP session live"}
+        probe = await mgr.probe(server)
+        stats = mgr.stats().get(server, {})
+        if not probe.get("alive"):
+            # stats["connected"] is just "session object still registered" (True even
+            # for a hung session) — spread it first so the probe result below wins.
+            return {**stats, "connected": False, "reconnectable": True,
+                    "detail": f"session unresponsive: {probe.get('detail', '?')}"}
+        latency = probe.get("latency_ms")
+        return {**stats, "connected": True, "reconnectable": True, "latency_ms": latency,
+                "detail": f"live · ping {latency}ms"}
     defined = server in mcp_server_defs()
-    return {"connected": False,
+    return {"connected": False, "reconnectable": defined,
             "detail": "defined in settings.json, not started" if defined else "not configured"}
 
 
 @register("ms-graph")
 async def ms_graph():
-    return _mcp_status("ms-graph")
+    status = await _mcp_status("ms-graph")
+    if status.get("connected"):
+        auth_err = recent_graph_auth_failure()
+        if auth_err:
+            status["auth_warning"] = True
+            status["detail"] = f"session live but token may be expired — {auth_err[:80]}"
+            status["last_error"] = auth_err
+    return status
 
 
 @register("azure-devops")
 async def azure_devops():
-    return _mcp_status("azure-devops")
+    return await _mcp_status("azure-devops")
 
 
 @register("confluence")
 async def confluence():
-    return _mcp_status("atlassian")
+    # Confluence is reached over REST with the atlassian token, not an MCP
+    # session, so health = credentials present (calls are cheap-checked there).
+    env = mcp_server_defs().get("atlassian", {}).get("env", {})
+    ok = bool(env.get("ATLASSIAN_URL") and env.get("ATLASSIAN_EMAIL")
+              and env.get("ATLASSIAN_API_TOKEN"))
+    return {"connected": ok,
+            "detail": "REST token configured" if ok else "no Atlassian credentials in settings.json"}
 
 
 @register("github")
